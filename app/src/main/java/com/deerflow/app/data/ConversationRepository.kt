@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -54,6 +55,7 @@ class ConversationRepository(
     private val mutex = Mutex()
     private val statesByThread = mutableMapOf(initialThreadId to _state.value)
     private val runJobsByThread = mutableMapOf<String, Job>()
+    private val activeOperations = java.util.concurrent.atomic.AtomicInteger(0)
     private val deletedThreadIds = mutableSetOf<String>()
 
     private val _runningThreadIds = MutableStateFlow<Set<String>>(emptySet())
@@ -224,49 +226,56 @@ class ConversationRepository(
         val trimmed = text.trim()
         if (trimmed.isEmpty() && attachments.isEmpty()) return
         scope.launch {
-            val threadId = mutex.withLock { currentThreadId }
-            val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
-            jobToJoin?.cancel()
-            jobToJoin?.join()
-            mutex.withLock {
-                updateRunningThreadIdsLocked()
-                updateForegroundServiceLocked()
-            }
-
-            var uploadedFiles: List<UploadedFile> = emptyList()
-            if (attachments.isNotEmpty()) {
+            activeOperations.incrementAndGet()
+            mutex.withLock { updateForegroundServiceLocked() }
+            try {
+                val threadId = mutex.withLock { currentThreadId }
+                val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
+                jobToJoin?.cancel()
+                jobToJoin?.join()
                 mutex.withLock {
-                    updateThreadStateLocked(threadId) { it.copy(status = "Uploading ${attachments.size} attachment(s)...") }
+                    updateRunningThreadIdsLocked()
+                    updateForegroundServiceLocked()
                 }
 
-                val cfg = settings.current()
-                val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
-                val parts = attachments.map { it.toUploadFilePart() }
-                val uploadResult = runCatching { client.uploadFiles(threadId, parts) }
-                    .getOrElse { error ->
-                        mutex.withLock {
-                            updateThreadStateLocked(threadId) {
-                                it.copy(running = false, status = "Upload error: ${error.message}")
-                                    .appendSystem(BlockKind.ERROR, "[UPLOAD_ERROR]", error.message.orEmpty())
-                            }
-                        }
-                        return@launch
+                var uploadedFiles: List<UploadedFile> = emptyList()
+                if (attachments.isNotEmpty()) {
+                    mutex.withLock {
+                        updateThreadStateLocked(threadId) { it.copy(status = "Uploading ${attachments.size} attachment(s)...") }
                     }
-                uploadedFiles = uploadResult.files
-            }
 
-            mutex.withLock {
-                val state = statesByThread[threadId] ?: ConversationState(threadId = threadId)
-
-                val displayText = UserDisplayText.clean(buildUserDisplayText(trimmed, uploadedFiles))
-                val promptText = buildAgentPromptText(trimmed, uploadedFiles)
-                val nextState = state.let { s ->
-                    s.appendSystem(BlockKind.USER, "You", displayText)
-                        .copy(history = s.history + userMessage(promptText))
+                    val cfg = settings.current()
+                    val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
+                    val parts = attachments.map { it.toUploadFilePart() }
+                    val uploadResult = runCatching { client.uploadFiles(threadId, parts) }
+                        .getOrElse { error ->
+                            mutex.withLock {
+                                updateThreadStateLocked(threadId) {
+                                    it.copy(running = false, status = "Upload error: ${error.message}")
+                                        .appendSystem(BlockKind.ERROR, "[UPLOAD_ERROR]", error.message.orEmpty())
+                                }
+                            }
+                            return@launch
+                        }
+                    uploadedFiles = uploadResult.files
                 }
-                updateThreadStateLocked(threadId) { nextState }
-                saveCurrentThread(nextState)
-                startRun(threadId, emptyList())
+
+                mutex.withLock {
+                    val state = statesByThread[threadId] ?: ConversationState(threadId = threadId)
+
+                    val displayText = UserDisplayText.clean(buildUserDisplayText(trimmed, uploadedFiles))
+                    val promptText = buildAgentPromptText(trimmed, uploadedFiles)
+                    val nextState = state.let { s ->
+                        s.appendSystem(BlockKind.USER, "You", displayText)
+                            .copy(history = s.history + userMessage(promptText))
+                    }
+                    updateThreadStateLocked(threadId) { nextState }
+                    saveCurrentThread(nextState)
+                    startRun(threadId, emptyList())
+                }
+            } finally {
+                activeOperations.decrementAndGet()
+                mutex.withLock { updateForegroundServiceLocked() }
             }
         }
     }
@@ -275,15 +284,22 @@ class ConversationRepository(
     fun resume(text: String) {
         val entries = buildResumeEntries(text) ?: return
         scope.launch {
-            val threadId = mutex.withLock { currentThreadId }
-            val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
-            jobToJoin?.cancel()
-            jobToJoin?.join()
-            mutex.withLock {
-                updateRunningThreadIdsLocked()
-                updateForegroundServiceLocked()
-                updateThreadStateLocked(threadId) { it.copy(interrupts = emptyList()).removeBlock("interrupts") }
-                startRun(threadId, entries)
+            activeOperations.incrementAndGet()
+            mutex.withLock { updateForegroundServiceLocked() }
+            try {
+                val threadId = mutex.withLock { currentThreadId }
+                val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
+                jobToJoin?.cancel()
+                jobToJoin?.join()
+                mutex.withLock {
+                    updateRunningThreadIdsLocked()
+                    updateForegroundServiceLocked()
+                    updateThreadStateLocked(threadId) { it.copy(interrupts = emptyList()).removeBlock("interrupts") }
+                    startRun(threadId, entries)
+                }
+            } finally {
+                activeOperations.decrementAndGet()
+                mutex.withLock { updateForegroundServiceLocked() }
             }
         }
     }
@@ -330,6 +346,14 @@ class ConversationRepository(
             val cfg = settings.current()
             val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
             client.runStream(threadId, historyToSend, resume)
+                .retryWhen { cause, attempt ->
+                    if (cause is java.io.IOException && attempt < 3) {
+                        kotlinx.coroutines.delay(1000L * (attempt + 1))
+                        true
+                    } else {
+                        false
+                    }
+                }
                 .catch { e ->
                     mutex.withLock {
                         if (runJobsByThread[threadId] == myJob) {
@@ -423,7 +447,7 @@ class ConversationRepository(
     }
 
     private fun updateForegroundServiceLocked() {
-        if (runJobsByThread.isEmpty()) {
+        if (runJobsByThread.isEmpty() && activeOperations.get() == 0) {
             SseForegroundService.stop(appContext)
         } else {
             SseForegroundService.start(appContext)
