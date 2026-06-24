@@ -1,0 +1,5 @@
+<resources>
+    <!-- Base launcher/Activity theme. Compose drives the actual UI colors via
+         MaterialTheme; this only needs to be a no-action-bar Material3 theme. -->
+    <style name="Theme.Deerflow" parent="Theme.Material3.DayNight.NoActionBar" />
+</resources>
