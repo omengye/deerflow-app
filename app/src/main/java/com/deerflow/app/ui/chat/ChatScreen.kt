@@ -1,9 +1,13 @@
 package com.deerflow.app.ui.chat
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.speech.RecognizerIntent
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -35,6 +39,7 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -82,6 +87,7 @@ import com.deerflow.app.data.PendingAttachment
 import com.deerflow.app.domain.ConversationState
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -380,6 +386,45 @@ private fun InputBar(
     val placeholder = if (awaitingInterrupt) "Reply to interrupt..." else "Type a message..."
     val scheme = MaterialTheme.colorScheme
     val canAttach = !running && !awaitingInterrupt
+    val context = LocalContext.current
+
+    fun appendSpeechText(spokenText: String) {
+        val trimmed = spokenText.trim()
+        if (trimmed.isNotEmpty()) {
+            text = if (text.isBlank()) trimmed else "${text.trimEnd()} $trimmed"
+        }
+    }
+
+    val speechInputLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spokenText = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                .orEmpty()
+            appendSpeechText(spokenText)
+        }
+    }
+
+    fun requestSpeechInput() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak now")
+        }
+        val canHandleSpeechInput = intent.resolveActivity(context.packageManager) != null
+        if (!canHandleSpeechInput) {
+            Toast.makeText(context, "Speech recognition is not available", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        try {
+            speechInputLauncher.launch(intent)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(context, "Speech recognition is not available", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     LaunchedEffect(canAttach) {
         if (!canAttach) toolsExpanded = false
@@ -454,6 +499,26 @@ private fun InputBar(
                 keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { send() }),
             )
+
+            val speechEnabled = !running
+            IconButton(
+                onClick = { requestSpeechInput() },
+                enabled = speechEnabled,
+                colors = IconButtonDefaults.iconButtonColors(
+                    containerColor = scheme.surfaceVariant,
+                    contentColor = scheme.onSurfaceVariant,
+                    disabledContainerColor = scheme.surfaceVariant.copy(alpha = 0.55f),
+                    disabledContentColor = scheme.onSurfaceVariant.copy(alpha = 0.35f),
+                ),
+                modifier = Modifier.size(44.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Mic,
+                    contentDescription = "Start speech input",
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+
             if (running) {
                 IconButton(
                     onClick = onCancel,
