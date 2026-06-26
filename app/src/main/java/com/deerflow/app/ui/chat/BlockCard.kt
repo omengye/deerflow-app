@@ -1,5 +1,10 @@
 package com.deerflow.app.ui.chat
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
@@ -11,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -18,28 +24,38 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -48,13 +64,28 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import com.deerflow.app.domain.BlockKind
 import com.deerflow.app.domain.DisplayBlock
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.SubcomposeAsyncImageContent
+import coil.request.ImageRequest
 import com.deerflow.app.domain.UserDisplayText
+import com.deerflow.app.domain.model.AgentArtifact
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** Renders one transcript block, styled by its kind, using a premium AI Chat aesthetic with Markdown. */
 @Composable
-fun BlockCard(block: DisplayBlock, modifier: Modifier = Modifier) {
+fun BlockCard(
+    block: DisplayBlock,
+    modifier: Modifier = Modifier,
+    artifactHeaders: Map<String, String> = emptyMap(),
+) {
     val scheme = MaterialTheme.colorScheme
 
     Box(
@@ -75,7 +106,8 @@ fun BlockCard(block: DisplayBlock, modifier: Modifier = Modifier) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
                         MarkdownText(
                             text = UserDisplayText.clean(block.content),
-                            textColor = scheme.onPrimaryContainer
+                            textColor = scheme.onPrimaryContainer,
+                            artifactHeaders = artifactHeaders,
                         )
                     }
                 }
@@ -110,7 +142,8 @@ fun BlockCard(block: DisplayBlock, modifier: Modifier = Modifier) {
                         Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
                             MarkdownText(
                                 text = block.content,
-                                textColor = scheme.onSecondary
+                                textColor = scheme.onSecondary,
+                                artifactHeaders = artifactHeaders,
                             )
                         }
                     }
@@ -301,6 +334,19 @@ fun BlockCard(block: DisplayBlock, modifier: Modifier = Modifier) {
                 }
             }
 
+            BlockKind.ARTIFACT -> {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .fillMaxWidth(0.85f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    block.artifacts.forEach { artifact ->
+                        ArtifactCard(artifact = artifact, headers = artifactHeaders)
+                    }
+                }
+            }
+
             BlockKind.INTERRUPT, BlockKind.ERROR -> {
                 // Warning/Alert/Interrupt Card
                 val isError = block.kind == BlockKind.ERROR
@@ -360,6 +406,239 @@ fun BlockCard(block: DisplayBlock, modifier: Modifier = Modifier) {
     }
 }
 
+@Composable
+private fun ArtifactCard(artifact: AgentArtifact, headers: Map<String, String>) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var previewOpen by remember { mutableStateOf(false) }
+    var opening by remember { mutableStateOf(false) }
+    val isImage = artifact.kind == "image" || artifact.mimeType?.startsWith("image/") == true
+
+    fun openExternal() {
+        scope.launch {
+            opening = true
+            val result = runCatching { downloadArtifact(context, artifact, headers) }
+            opening = false
+            result.onSuccess { uri ->
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, artifact.mimeType ?: "application/octet-stream")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                try {
+                    context.startActivity(intent)
+                } catch (_: ActivityNotFoundException) {
+                    Toast.makeText(context, "No app can open this file", Toast.LENGTH_SHORT).show()
+                }
+            }.onFailure { error ->
+                Toast.makeText(context, "Open failed: ${error.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { if (isImage) previewOpen = true else openExternal() },
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = scheme.secondary),
+        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.25f)),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            if (isImage) {
+                NetworkImage(
+                    model = authenticatedImageRequest(context, artifact.url, headers),
+                    contentDescription = artifact.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(scheme.surfaceVariant),
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector = if (isImage) Icons.Default.Image else Icons.Default.AttachFile,
+                        contentDescription = null,
+                        tint = scheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = artifact.name,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = scheme.onSecondary,
+                            maxLines = 1,
+                        )
+                        Text(
+                            text = if (opening) "Opening..." else artifact.mimeType ?: "file",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.onSecondary.copy(alpha = 0.65f),
+                            maxLines = 1,
+                        )
+                    }
+                }
+                Icon(
+                    imageVector = Icons.Default.OpenInNew,
+                    contentDescription = "Open artifact",
+                    tint = scheme.onSecondary.copy(alpha = 0.7f),
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clickable { openExternal() },
+                )
+            }
+        }
+    }
+
+    if (previewOpen && isImage) {
+        AlertDialog(
+            onDismissRequest = { previewOpen = false },
+            confirmButton = {
+                TextButton(onClick = { previewOpen = false }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(onClick = { openExternal() }) { Text("Open") }
+            },
+            title = { Text(artifact.name, maxLines = 1) },
+            text = {
+                NetworkImage(
+                    model = authenticatedImageRequest(context, artifact.url, headers),
+                    contentDescription = artifact.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(scheme.surfaceVariant),
+                )
+            },
+        )
+    }
+}
+
+private suspend fun downloadArtifact(
+    context: Context,
+    artifact: AgentArtifact,
+    headers: Map<String, String>,
+): Uri = downloadUrl(context, artifact.url, artifact.name, headers)
+
+private suspend fun downloadUrl(
+    context: Context,
+    url: String,
+    name: String,
+    headers: Map<String, String>,
+): Uri = withContext(Dispatchers.IO) {
+    val dir = File(context.cacheDir, "artifacts").apply { mkdirs() }
+    val file = File(dir, sanitizeArtifactFilename(name))
+    val connection = URL(url).openConnection()
+    headers.forEach { (key, value) ->
+        if (key.isNotBlank()) connection.setRequestProperty(key, value)
+    }
+    if (connection is HttpURLConnection) {
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 60_000
+        if (connection.responseCode !in 200..299) {
+            throw IllegalStateException("HTTP ${connection.responseCode}")
+        }
+    }
+    connection.getInputStream().use { input ->
+        file.outputStream().use { output -> input.copyTo(output) }
+    }
+    FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+}
+
+@Composable
+private fun NetworkImage(
+    model: ImageRequest,
+    contentDescription: String?,
+    contentScale: ContentScale,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    SubcomposeAsyncImage(
+        model = model,
+        contentDescription = contentDescription,
+        contentScale = contentScale,
+        modifier = modifier,
+        loading = {
+            Box(
+                modifier = Modifier.fillMaxSize().background(scheme.surfaceVariant),
+                contentAlignment = Alignment.Center,
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                    color = scheme.primary,
+                )
+            }
+        },
+        error = {
+            ImageLoadState(
+                message = "Load failed",
+                modifier = Modifier.fillMaxSize().background(scheme.surfaceVariant),
+            )
+        },
+        success = { SubcomposeAsyncImageContent() },
+    )
+}
+
+@Composable
+private fun ImageLoadState(message: String, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Column(
+        modifier = modifier.padding(12.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Icon(
+            imageVector = Icons.Default.Warning,
+            contentDescription = null,
+            tint = scheme.onSurfaceVariant.copy(alpha = 0.65f),
+            modifier = Modifier.size(24.dp),
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = message,
+            style = MaterialTheme.typography.labelMedium,
+            color = scheme.onSurfaceVariant.copy(alpha = 0.8f),
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+private fun authenticatedImageRequest(
+    context: Context,
+    url: String,
+    headers: Map<String, String>,
+): ImageRequest {
+    return ImageRequest.Builder(context)
+        .data(url)
+        .apply {
+            headers.forEach { (key, value) ->
+                if (key.isNotBlank()) setHeader(key, value)
+            }
+        }
+        .build()
+}
+
+private fun sanitizeArtifactFilename(name: String): String {
+    val clean = name.substringAfterLast('/').substringAfterLast('\\').trim()
+        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+    return clean.ifEmpty { "artifact" }
+}
+
 // ---------------------------------------------------------------------------
 // Custom Lightweight Markdown Composable & Parser
 // ---------------------------------------------------------------------------
@@ -369,6 +648,7 @@ private sealed class MarkdownBlock {
     data class Header(val level: Int, val text: String) : MarkdownBlock()
     data class ListItem(val ordered: Boolean, val index: Int, val text: String) : MarkdownBlock()
     data class CodeBlock(val language: String, val code: String) : MarkdownBlock()
+    data class ImageBlock(val alt: String, val url: String) : MarkdownBlock()
     data class Table(val headers: List<String>, val rows: List<List<String>>) : MarkdownBlock()
 }
 
@@ -376,7 +656,8 @@ private sealed class MarkdownBlock {
 private fun MarkdownText(
     text: String,
     modifier: Modifier = Modifier,
-    textColor: Color = MaterialTheme.colorScheme.onSurface
+    textColor: Color = MaterialTheme.colorScheme.onSurface,
+    artifactHeaders: Map<String, String> = emptyMap(),
 ) {
     val scheme = MaterialTheme.colorScheme
     val blocks = remember(text) { parseBlocks(text) }
@@ -455,6 +736,9 @@ private fun MarkdownText(
                         style = MaterialTheme.typography.bodyLarge
                     )
                 }
+                is MarkdownBlock.ImageBlock -> {
+                    MarkdownImage(block, artifactHeaders)
+                }
                 is MarkdownBlock.Table -> {
                     MarkdownTable(
                         headers = block.headers,
@@ -465,6 +749,86 @@ private fun MarkdownText(
             }
         }
         }
+    }
+}
+
+@Composable
+private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, String>) {
+    val scheme = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var previewOpen by remember { mutableStateOf(false) }
+    var opening by remember { mutableStateOf(false) }
+    val renderableUrl = remember(block.url) {
+        block.url.trim().takeIf { it.startsWith("http://") || it.startsWith("https://") }
+    }
+    if (renderableUrl == null) {
+        Text(
+            text = block.alt.ifBlank { block.url },
+            style = MaterialTheme.typography.bodyMedium,
+            color = scheme.primary,
+        )
+        return
+    }
+
+    fun openExternal() {
+        scope.launch {
+            opening = true
+            val result = runCatching {
+                downloadUrl(context, renderableUrl, block.alt.ifBlank { "image" }, headers)
+            }
+            opening = false
+            result.onSuccess { uri ->
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "image/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                try {
+                    context.startActivity(intent)
+                } catch (_: ActivityNotFoundException) {
+                    Toast.makeText(context, "No app can open this image", Toast.LENGTH_SHORT).show()
+                }
+            }.onFailure { error ->
+                Toast.makeText(context, "Open failed: ${error.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    NetworkImage(
+        model = authenticatedImageRequest(context, renderableUrl, headers),
+        contentDescription = block.alt,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(scheme.surfaceVariant)
+            .clickable { previewOpen = true },
+    )
+
+    if (previewOpen) {
+        AlertDialog(
+            onDismissRequest = { previewOpen = false },
+            confirmButton = { TextButton(onClick = { previewOpen = false }) { Text("Close") } },
+            dismissButton = {
+                TextButton(onClick = { openExternal() }) {
+                    Text(if (opening) "Opening..." else "Open")
+                }
+            },
+            title = { Text(block.alt.ifBlank { "Image" }, maxLines = 1) },
+            text = {
+                NetworkImage(
+                    model = authenticatedImageRequest(context, renderableUrl, headers),
+                    contentDescription = block.alt,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(360.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(scheme.surfaceVariant),
+                )
+            },
+        )
     }
 }
 
@@ -489,6 +853,8 @@ private fun parseTableCells(line: String): List<String> {
     val t = line.trim().removePrefix("|").removeSuffix("|")
     return t.split("|").map { it.trim() }
 }
+
+private val markdownImageRegex = Regex("!\\[([^\\]]*)\\]\\(([^)]+)\\)")
 
 private fun parseBlocks(text: String): List<MarkdownBlock> {
     val lines = text.split("\n")
@@ -574,6 +940,11 @@ private fun parseBlocks(text: String): List<MarkdownBlock> {
         when {
             trimmed.isEmpty() -> {
                 flushParagraph()
+            }
+            markdownImageRegex.matchEntire(trimmed) != null -> {
+                flushParagraph()
+                val match = markdownImageRegex.matchEntire(trimmed)!!
+                blocks.add(MarkdownBlock.ImageBlock(match.groupValues[1].trim(), match.groupValues[2].trim()))
             }
             trimmed.startsWith("#") -> {
                 flushParagraph()

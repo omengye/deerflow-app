@@ -11,10 +11,12 @@ import com.deerflow.app.domain.ConversationReducer
 import com.deerflow.app.domain.ConversationState
 import com.deerflow.app.domain.ReplayState
 import com.deerflow.app.domain.UserDisplayText
+import com.deerflow.app.domain.model.AgentArtifact
 import com.deerflow.app.domain.model.AguiEvent
 import com.deerflow.app.domain.model.ChatMessage
 import com.deerflow.app.domain.model.ResumeEntry
 import com.deerflow.app.domain.model.ThreadMeta
+import com.deerflow.app.domain.model.ThreadStore
 import com.deerflow.app.domain.model.asMessageText
 import com.deerflow.app.domain.model.userMessage
 import com.deerflow.app.service.SseForegroundService
@@ -23,11 +25,14 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -66,17 +71,26 @@ class ConversationRepository(
 
     private val _threads = MutableStateFlow<List<ThreadMeta>>(emptyList())
     val threads: StateFlow<List<ThreadMeta>> = _threads.asStateFlow()
+    val artifactHeaders: StateFlow<Map<String, String>> = settings.flow
+        .map { it.headers() }
+        .stateIn(scope, SharingStarted.Eagerly, emptyMap())
 
     init {
         scope.launch {
+            var recentThreadId: String? = null
             mutex.withLock {
                 loadIndex()
                 val recent = _threads.value.firstOrNull()
                 if (recent != null) {
+                    recentThreadId = recent.id
                     val loaded = loadThreadInternal(recent.id)
                     statesByThread[recent.id] = loaded
                     setCurrentThreadLocked(recent.id, loaded)
                 }
+            }
+            recentThreadId?.let { threadId ->
+                val cfg = settings.current()
+                syncThreadInfo(threadId, AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState()))
             }
         }
     }
@@ -118,11 +132,11 @@ class ConversationRepository(
         }
         return runCatching {
             val content = file.readText()
-            val history = AguiJson.decodeFromString(ListSerializer(ChatMessage.serializer()), content)
-            val rawJson = JsonObject(mapOf("messages" to AguiJson.encodeToJsonElement(ListSerializer(ChatMessage.serializer()), history)))
+            val store = decodeThreadStore(content)
+            val rawJson = JsonObject(mapOf("messages" to AguiJson.encodeToJsonElement(ListSerializer(ChatMessage.serializer()), store.messages)))
             val event = AguiEvent(type = "MESSAGES_SNAPSHOT", raw = rawJson)
-            val baseState = ConversationState(threadId = threadId, history = history, status = "Idle")
-            ConversationReducer.reduce(baseState, event)
+            val baseState = ConversationState(threadId = threadId, history = store.messages, status = "Idle")
+            ConversationReducer.reduce(baseState, event).appendArtifacts(store.artifacts)
         }.getOrElse {
             ConversationState(threadId = threadId, status = "Idle")
         }.let { loaded ->
@@ -130,10 +144,18 @@ class ConversationRepository(
         }
     }
 
+    private fun decodeThreadStore(content: String): ThreadStore {
+        return runCatching {
+            AguiJson.decodeFromString(ThreadStore.serializer(), content)
+        }.getOrElse {
+            ThreadStore(messages = AguiJson.decodeFromString(ListSerializer(ChatMessage.serializer()), content))
+        }
+    }
+
     private fun saveCurrentThread(state: ConversationState) {
         val threadId = state.threadId
         val history = state.history
-        if (history.isEmpty()) return
+        if (history.isEmpty() && state.artifacts.isEmpty()) return
 
         scope.launch(kotlinx.coroutines.Dispatchers.IO) {
             mutex.withLock {
@@ -141,7 +163,7 @@ class ConversationRepository(
 
                 val file = threadsDir.resolve("thread_$threadId.json")
                 runCatching {
-                    val content = AguiJson.encodeToString(ListSerializer(ChatMessage.serializer()), history)
+                    val content = AguiJson.encodeToString(ThreadStore.serializer(), ThreadStore(messages = history, artifacts = state.artifacts))
                     file.writeText(content)
 
                     // Update index
@@ -180,6 +202,8 @@ class ConversationRepository(
                     saveIndex(updated)
                 }
             }
+            val cfg = settings.current()
+            syncThreadInfo(threadId, AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState()))
         }
     }
 
@@ -386,23 +410,8 @@ class ConversationRepository(
                         }
                         updateForegroundServiceLocked()
                     }
-                    if (shouldFetch) {
-                        scope.launch {
-                            val fetchedTitle = client.fetchThreadTitle(threadId)
-                            if (!fetchedTitle.isNullOrBlank()) {
-                                mutex.withLock {
-                                    val currentMeta = _threads.value
-                                    val existing = currentMeta.find { it.id == threadId }
-                                    if (existing != null) {
-                                        val updated = currentMeta.filterNot { it.id == threadId } + existing.copy(
-                                            title = fetchedTitle,
-                                            isTitleFetched = true
-                                        )
-                                        saveIndex(updated)
-                                    }
-                                }
-                            }
-                        }
+                    scope.launch {
+                        syncThreadInfo(threadId, client, markTitleFetched = shouldFetch)
                     }
                 }
                 .collect { event ->
@@ -425,6 +434,40 @@ class ConversationRepository(
         updateRunningThreadIdsLocked()
         updateForegroundServiceLocked()
         job.start()
+    }
+
+    private suspend fun syncThreadInfo(
+        threadId: String,
+        client: AguiClient,
+        markTitleFetched: Boolean = false,
+    ) {
+        val info = client.fetchThreadInfo(threadId) ?: return
+        mutex.withLock {
+            if (threadId in deletedThreadIds) return@withLock
+            if (info.artifacts.isNotEmpty()) {
+                updateThreadStateLocked(threadId) { it.appendArtifacts(info.artifacts) }
+                statesByThread[threadId]?.let(::saveCurrentThread)
+            }
+            val title = info.title?.trim().orEmpty()
+            if (title.isNotEmpty() || markTitleFetched) {
+                val currentMeta = _threads.value
+                val existing = currentMeta.find { it.id == threadId }
+                val updated = if (existing != null) {
+                    currentMeta.filterNot { it.id == threadId } + existing.copy(
+                        title = title.ifEmpty { existing.title },
+                        isTitleFetched = existing.isTitleFetched || markTitleFetched || title.isNotEmpty(),
+                    )
+                } else {
+                    currentMeta + ThreadMeta(
+                        id = threadId,
+                        title = title.ifEmpty { "New Chat" },
+                        lastActive = System.currentTimeMillis(),
+                        isTitleFetched = markTitleFetched || title.isNotEmpty(),
+                    )
+                }
+                saveIndex(updated)
+            }
+        }
     }
 
     private fun setCurrentThreadLocked(threadId: String, state: ConversationState) {
@@ -510,6 +553,7 @@ class ConversationRepository(
             "RUN_FINISHED",
             "RUN_CANCELLED",
             "RUN_ERROR" -> currentHistorySize != lastSavedHistorySize
+            "CUSTOM" -> true
             "TOOL_CALL_END" -> true
             else -> false
         }

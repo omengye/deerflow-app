@@ -1,5 +1,6 @@
 package com.deerflow.app.data.agui
 
+import com.deerflow.app.domain.model.AgentArtifact
 import com.deerflow.app.domain.model.AguiEvent
 import com.deerflow.app.domain.model.ChatMessage
 import com.deerflow.app.domain.model.ResumeEntry
@@ -14,6 +15,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -27,6 +29,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
 import java.io.InputStream
+import java.net.URLConnection
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -61,6 +64,17 @@ data class UploadResponse(
     val success: Boolean = false,
     val files: List<UploadedFile> = emptyList(),
     val message: String? = null,
+)
+
+@Serializable
+private data class ThreadDetailResponse(
+    val title: String? = null,
+    val artifacts: List<kotlinx.serialization.json.JsonElement> = emptyList(),
+)
+
+data class ThreadInfo(
+    val title: String? = null,
+    val artifacts: List<AgentArtifact> = emptyList(),
 )
 
 /**
@@ -225,11 +239,12 @@ class AguiClient(
 
                 fun parseBufferedEvent(): AguiEvent {
                     val payload = dataLines.toString()
-                    return if (dataTruncated) {
+                    val event = if (dataTruncated) {
                         EventParser.parseTruncated(payload, dataOriginalLength)
                     } else {
                         EventParser.parse(payload)
                     }
+                    return absolutizeArtifactUrls(event)
                 }
 
                 fun clearBufferedEvent() {
@@ -299,6 +314,47 @@ class AguiClient(
         }
     }.flowOn(Dispatchers.IO)
 
+    private fun absolutizeArtifactUrls(event: AguiEvent): AguiEvent {
+        if (event.type != "CUSTOM" || event.raw.str("name") != "deerflow.artifacts") return event
+        val value = event.raw["value"] as? JsonObject ?: return event
+        val artifacts = value["artifacts"] as? JsonArray ?: return event
+        val rewritten = JsonArray(artifacts.map { item ->
+            val obj = item as? JsonObject ?: return@map item
+            val url = obj.str("url") ?: return@map item
+            JsonObject(obj.toMutableMap().also { fields ->
+                fields["url"] = JsonPrimitive(absoluteArtifactUrl(url))
+            })
+        })
+        val newValue = JsonObject(value.toMutableMap().also { it["artifacts"] = rewritten })
+        val newRaw = JsonObject(event.raw.toMutableMap().also { it["value"] = newValue })
+        return event.copy(raw = newRaw)
+    }
+
+    private fun absoluteArtifactUrl(url: String): String {
+        val trimmed = url.trim()
+        val parsedEndpoint = endpoint.toHttpUrlOrNull()
+        val parsedUrl = trimmed.toHttpUrlOrNull()
+        if (parsedUrl != null) {
+            if (parsedEndpoint != null && parsedUrl.host.isLoopbackHost() && parsedUrl.host != parsedEndpoint.host) {
+                return parsedUrl.newBuilder()
+                    .scheme(parsedEndpoint.scheme)
+                    .host(parsedEndpoint.host)
+                    .port(parsedEndpoint.port)
+                    .build()
+                    .toString()
+            }
+            return trimmed
+        }
+        val origin = parsedEndpoint
+            ?.newBuilder()
+            ?.encodedPath("/")
+            ?.query(null)
+            ?.fragment(null)
+            ?.build()
+            ?: return trimmed
+        return origin.resolve(trimmed)?.toString() ?: trimmed
+    }
+
     /** Upload local files into a DeerFlow thread before starting an AG-UI run. */
     suspend fun uploadFiles(threadId: String, files: List<UploadFilePart>): UploadResponse {
         if (files.isEmpty()) return UploadResponse(success = true, files = emptyList())
@@ -338,7 +394,10 @@ class AguiClient(
     }
 
     /** Fetch the thread title from the backend API. */
-    suspend fun fetchThreadTitle(threadId: String): String? {
+    suspend fun fetchThreadTitle(threadId: String): String? = fetchThreadInfo(threadId)?.title
+
+    /** Fetch thread metadata that is useful for local history recovery. */
+    suspend fun fetchThreadInfo(threadId: String): ThreadInfo? {
         val url = "$threadsBaseUrl/$threadId"
         val request = Request.Builder()
             .url(url)
@@ -349,21 +408,56 @@ class AguiClient(
         return kotlinx.coroutines.withContext(Dispatchers.IO) {
             runCatching {
                 http.newCall(request).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val bodyStr = resp.body?.string() ?: return@runCatching null
-                        val json = AguiJson.parseToJsonElement(bodyStr) as? JsonObject
-                        val titleElement = json?.get("title")
-                        if (titleElement is JsonPrimitive && titleElement.isString) {
-                            titleElement.content
-                        } else {
-                            null
-                        }
-                    } else {
-                        null
-                    }
+                    if (!resp.isSuccessful) return@runCatching null
+                    val bodyStr = resp.body?.string() ?: return@runCatching null
+                    val detail = AguiJson.decodeFromString(ThreadDetailResponse.serializer(), bodyStr)
+                    ThreadInfo(
+                        title = detail.title,
+                        artifacts = detail.artifacts.mapNotNull { artifactFromThreadDetail(threadId, it) },
+                    )
                 }
             }.getOrNull()
         }
+    }
+
+
+    private fun artifactFromThreadDetail(threadId: String, raw: kotlinx.serialization.json.JsonElement): AgentArtifact? {
+        return when (raw) {
+            is JsonPrimitive -> if (raw.isString) artifactFromVirtualPath(threadId, raw.content) else null
+            is JsonObject -> {
+                val path = raw.str("path") ?: raw.str("virtual_path") ?: return null
+                val fallback = artifactFromVirtualPath(threadId, path) ?: return null
+                fallback.copy(
+                    name = raw.str("name") ?: raw.str("filename") ?: fallback.name,
+                    url = raw.str("url")?.let(::absoluteArtifactUrl) ?: raw.str("artifact_url")?.let(::absoluteArtifactUrl) ?: fallback.url,
+                    mimeType = raw.str("mimeType") ?: raw.str("mime_type") ?: fallback.mimeType,
+                    kind = raw.str("kind") ?: fallback.kind,
+                    size = raw.str("size")?.toLongOrNull() ?: fallback.size,
+                )
+            }
+            else -> null
+        }
+    }
+
+    private fun artifactFromVirtualPath(threadId: String, path: String): AgentArtifact? {
+        val clean = path.trim()
+        if (!clean.startsWith("/mnt/user-data/outputs/")) return null
+        val name = clean.substringAfterLast('/').ifBlank { "artifact" }
+        val mimeType = URLConnection.guessContentTypeFromName(name)
+        return AgentArtifact(
+            path = clean,
+            name = name,
+            url = artifactUrl(threadId, clean),
+            mimeType = mimeType,
+            kind = if (mimeType?.startsWith("image/") == true) "image" else "file",
+        )
+    }
+
+    private fun artifactUrl(threadId: String, path: String): String {
+        val base = "$threadsBaseUrl/$threadId/artifacts".toHttpUrlOrNull() ?: return "$threadsBaseUrl/$threadId/artifacts/${path.trimStart('/')}"
+        return base.newBuilder().apply {
+            path.trimStart('/').split('/').filter { it.isNotEmpty() }.forEach { addPathSegment(it) }
+        }.build().toString()
     }
 
     companion object {
@@ -385,6 +479,9 @@ class AguiClient(
         }
     }
 }
+
+private fun String.isLoopbackHost(): Boolean =
+    equals("localhost", ignoreCase = true) || this == "127.0.0.1" || this == "::1" || this == "0.0.0.0"
 
 private fun UploadFilePart.asRequestBody(): RequestBody {
     val contentType = (mimeType ?: "application/octet-stream").toMediaTypeOrNull()

@@ -96,6 +96,7 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val artifactHeaders by vm.artifactHeaders.collectAsStateWithLifecycle()
     val scheme = MaterialTheme.colorScheme
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
@@ -282,13 +283,17 @@ fun ChatScreen(
                 }
             },
         ) { padding ->
-            Transcript(state, Modifier.padding(padding))
+            Transcript(state, artifactHeaders, Modifier.padding(padding))
         }
     }
 }
 
 @Composable
-private fun Transcript(state: ConversationState, modifier: Modifier = Modifier) {
+private fun Transcript(
+    state: ConversationState,
+    artifactHeaders: Map<String, String>,
+    modifier: Modifier = Modifier,
+) {
     val listState = rememberLazyListState()
 
     // Auto-scroll when new blocks are appended, but avoid restarting animations for every streamed content chunk.
@@ -334,7 +339,9 @@ private fun Transcript(state: ConversationState, modifier: Modifier = Modifier) 
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
     ) {
-        items(state.blocks, key = { it.key }) { block -> BlockCard(block) }
+        items(state.blocks, key = { it.key }) { block ->
+            BlockCard(block, artifactHeaders = artifactHeaders)
+        }
     }
 }
 

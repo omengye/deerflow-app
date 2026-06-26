@@ -3,6 +3,7 @@ package com.deerflow.app.domain
 import com.deerflow.app.data.agui.EventParser
 import com.deerflow.app.data.agui.nestedStr
 import com.deerflow.app.data.agui.str
+import com.deerflow.app.domain.model.AgentArtifact
 import com.deerflow.app.domain.model.AguiEvent
 import com.deerflow.app.domain.model.ChatMessage
 import com.deerflow.app.domain.model.Interrupt
@@ -180,10 +181,18 @@ object ConversationReducer {
             // -- history / silent ---------------------------------------------
             "MESSAGES_SNAPSHOT" -> s.importSnapshot(e.raw["messages"])
 
+            "CUSTOM" -> {
+                if (e.raw.str("name") == "deerflow.artifacts") {
+                    s.appendArtifacts(parseArtifacts(e.raw))
+                } else {
+                    s
+                }
+            }
+
             // AG-UI protocol events that carry no user-visible content.
             // Silently absorb them so they don't appear as raw JSON in the chat.
             "STATE_SNAPSHOT", "STATE_DELTA",
-            "CUSTOM", "SYSTEM",
+            "SYSTEM",
             "MESSAGE_SNAPSHOT",                         // per-message snapshot (duplicate of streamed text)
             "STEP_STARTED", "STEP_FINISHED",            // agent step lifecycle
             "STEP_ERROR",                               // step-level error (RUN_ERROR already shown)
@@ -394,7 +403,7 @@ object ConversationReducer {
 
     private fun DisplayBlock.isSnapshotIndependentBlock(): Boolean =
         !key.startsWith("sys:") && when (kind) {
-            BlockKind.REASONING, BlockKind.THINKING -> true
+            BlockKind.REASONING, BlockKind.THINKING, BlockKind.ARTIFACT -> true
             else -> false
         }
 
@@ -504,6 +513,31 @@ object ConversationReducer {
         if (clean.length <= maxChars) return clean
         val omitted = clean.length - maxChars
         return clean.take(maxChars) + "\n\n[truncated $omitted chars for display]"
+    }
+
+    private fun parseArtifacts(raw: JsonObject): List<AgentArtifact> {
+        val value = raw["value"] as? JsonObject ?: return emptyList()
+        val arr = value["artifacts"] as? JsonArray ?: return emptyList()
+        return arr.mapNotNull { item ->
+            val obj = item as? JsonObject ?: return@mapNotNull null
+            val path = obj.str("path")?.trim().orEmpty()
+            val url = obj.str("url")?.trim().orEmpty()
+            if (path.isEmpty() || url.isEmpty()) return@mapNotNull null
+            val name = obj.str("name")?.trim()?.takeIf { it.isNotEmpty() }
+                ?: path.substringAfterLast('/').ifEmpty { "artifact" }
+            val mimeType = obj.str("mimeType") ?: obj.str("mime_type")
+            val kind = obj.str("kind")?.lowercase()?.takeIf { it == "image" || it == "file" }
+                ?: if (mimeType?.startsWith("image/") == true) "image" else "file"
+            val size = obj.str("size")?.toLongOrNull()
+            AgentArtifact(
+                path = path,
+                name = name,
+                url = url,
+                mimeType = mimeType,
+                kind = kind,
+                size = size,
+            )
+        }
     }
 
     private fun summarizeToolResult(raw: JsonObject): String {

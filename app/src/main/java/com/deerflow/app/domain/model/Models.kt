@@ -80,6 +80,16 @@ data class AguiEvent(
     val content: String? = null,
 )
 
+@Serializable
+data class AgentArtifact(
+    val path: String,
+    val name: String,
+    val url: String,
+    val mimeType: String? = null,
+    val kind: String = "file",
+    val size: Long? = null,
+)
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -119,4 +129,10 @@ data class ThreadMeta(
     val title: String,
     val lastActive: Long,
     val isTitleFetched: Boolean = false
+)
+
+@Serializable
+data class ThreadStore(
+    val messages: List<ChatMessage> = emptyList(),
+    val artifacts: List<AgentArtifact> = emptyList(),
 )

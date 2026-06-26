@@ -18,6 +18,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<ConversationState> = repo.state
     val threads: StateFlow<List<ThreadMeta>> = repo.threads
     val runningThreadIds: StateFlow<Set<String>> = repo.runningThreadIds
+    val artifactHeaders: StateFlow<Map<String, String>> = repo.artifactHeaders
 
     fun submit(text: String, attachments: List<PendingAttachment> = emptyList()) {
         if (state.value.awaitingInterrupt) repo.resume(text) else repo.send(text, attachments)

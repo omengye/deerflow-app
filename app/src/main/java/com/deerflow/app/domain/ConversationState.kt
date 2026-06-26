@@ -1,5 +1,6 @@
 package com.deerflow.app.domain
 
+import com.deerflow.app.domain.model.AgentArtifact
 import com.deerflow.app.domain.model.ChatMessage
 import com.deerflow.app.domain.model.Interrupt
 
@@ -9,9 +10,10 @@ data class DisplayBlock(
     val kind: BlockKind,
     val header: String,
     val content: String,
+    val artifacts: List<AgentArtifact> = emptyList(),
 )
 
-enum class BlockKind { USER, ASSISTANT, REASONING, THINKING, TOOL, SYSTEM, INTERRUPT, ERROR }
+enum class BlockKind { USER, ASSISTANT, REASONING, THINKING, TOOL, ARTIFACT, SYSTEM, INTERRUPT, ERROR }
 
 /** Buffer for an in-flight tool call. Port of tui.toolCallBuffer. */
 data class ToolBuffer(
@@ -33,6 +35,7 @@ data class ConversationState(
     val running: Boolean = false,
     val blocks: List<DisplayBlock> = emptyList(),
     val history: List<ChatMessage> = emptyList(),
+    val artifacts: List<AgentArtifact> = emptyList(),
     val interrupts: List<Interrupt> = emptyList(),
 
     // streaming buffers
@@ -75,4 +78,26 @@ data class ConversationState(
             blocks = blocks + DisplayBlock("sys:$systemCounter", kind, header, content.trim()),
             systemCounter = systemCounter + 1,
         )
+
+    fun appendArtifacts(newArtifacts: List<AgentArtifact>): ConversationState {
+        val visible = newArtifacts.filter { it.path.isNotBlank() && it.url.isNotBlank() }
+        if (visible.isEmpty()) return this
+        val existingPaths = (this.artifacts.map { it.path } + blocks.asSequence()
+            .flatMap { it.artifacts.asSequence() }
+            .map { it.path })
+            .toSet()
+        val fresh = visible.filterNot { it.path in existingPaths }
+        if (fresh.isEmpty()) return this
+        return copy(
+            artifacts = this.artifacts + fresh,
+            blocks = blocks + DisplayBlock(
+                key = "artifacts:$systemCounter",
+                kind = BlockKind.ARTIFACT,
+                header = "Generated files",
+                content = "",
+                artifacts = fresh,
+            ),
+            systemCounter = systemCounter + 1,
+        )
+    }
 }
