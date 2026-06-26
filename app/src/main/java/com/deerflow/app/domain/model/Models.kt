@@ -55,6 +55,10 @@ data class RunAgentInput(
     @SerialName("forwardedProps")
     val forwardedProps: JsonObject? = null,
     val resume: List<ResumeEntry>? = null,
+    @SerialName("multitaskStrategy")
+    val multitaskStrategy: String? = null,
+    @SerialName("onDisconnect")
+    val onDisconnect: String? = null,
 )
 
 /** Plain (non-serialized) interrupt model parsed out of RUN_FINISHED.outcome. */
@@ -78,6 +82,7 @@ data class AguiEvent(
     val toolCallId: String? = null,
     val toolCallName: String? = null,
     val content: String? = null,
+    val sseId: String? = null,
 )
 
 @Serializable

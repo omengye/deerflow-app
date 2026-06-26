@@ -92,6 +92,8 @@ class AguiClient(
 ) {
     private val streamUrl: String
     private val threadsBaseUrl: String
+    private val runsBaseUrl: String
+        get() = threadsBaseUrl.removeSuffix("/threads") + "/runs"
 
     init {
         val httpUrl = endpoint.toHttpUrlOrNull()
@@ -172,11 +174,13 @@ class AguiClient(
     /** Start (or resume, when [resume] is non-empty) a run and stream its events. */
     fun runStream(
         threadId: String,
+        runId: String,
         history: List<ChatMessage>,
         resume: List<ResumeEntry> = emptyList(),
+        lastEventId: String? = null,
     ): Flow<AguiEvent> = flow {
         val payload = RunAgentInput(
-            runId = newId("run"),
+            runId = runId,
             threadId = threadId,
             state = initialState.takeIf { it.isNotEmpty() },
             messages = history.map {
@@ -186,6 +190,7 @@ class AguiClient(
                 )
             },
             resume = resume.ifEmpty { null },
+            onDisconnect = "continue",
         )
 
         val body = AguiJson.encodeToString(RunAgentInput.serializer(), payload)
@@ -196,6 +201,7 @@ class AguiClient(
             .post(body)
             .header("Content-Type", "application/json")
             .header("Accept", "text/event-stream")
+            .apply { lastEventId?.takeIf { it.isNotBlank() }?.let { header("Last-Event-ID", it) } }
             .apply { headers.forEach { (k, v) -> header(k, v) } }
             .build()
 
@@ -215,6 +221,7 @@ class AguiClient(
                 val dataLines = StringBuilder()
                 var dataOriginalLength = 0
                 var dataTruncated = false
+                var bufferedEventId: String? = null
 
                 fun appendDataPayload(linePrefix: String, lineOriginalLength: Int, lineTruncated: Boolean) {
                     var start = "data:".length
@@ -244,13 +251,21 @@ class AguiClient(
                     } else {
                         EventParser.parse(payload)
                     }
-                    return absolutizeArtifactUrls(event)
+                    return absolutizeArtifactUrls(event).copy(sseId = bufferedEventId)
                 }
 
                 fun clearBufferedEvent() {
                     dataLines.setLength(0)
                     dataOriginalLength = 0
                     dataTruncated = false
+                    bufferedEventId = null
+                }
+
+                fun captureEventId(linePrefix: String, lineTruncated: Boolean) {
+                    if (lineTruncated) return
+                    var start = "id:".length
+                    if (start < linePrefix.length && linePrefix[start] == ' ') start += 1
+                    bufferedEventId = linePrefix.substring(start)
                 }
 
                 suspend fun processLine(linePrefix: String, lineOriginalLength: Int, lineTruncated: Boolean) {
@@ -263,7 +278,8 @@ class AguiClient(
                             }
                         }
                         linePrefix.startsWith("data:") -> appendDataPayload(linePrefix, lineOriginalLength, lineTruncated)
-                        // Other SSE fields (event:, id:, :comment) are ignored.
+                        linePrefix.startsWith("id:") -> captureEventId(linePrefix, lineTruncated)
+                        // Other SSE fields (event:, :comment) are ignored.
                     }
                 }
 
@@ -353,6 +369,26 @@ class AguiClient(
             ?.build()
             ?: return trimmed
         return origin.resolve(trimmed)?.toString() ?: trimmed
+    }
+
+    /** Cancel a backend run that may keep running after an SSE disconnect. */
+    suspend fun cancelRun(runId: String, action: String = "interrupt") {
+        val body = "{\"action\":\"$action\"}"
+            .toRequestBody("application/json".toMediaType())
+        val request = Request.Builder()
+            .url("$runsBaseUrl/$runId/cancel")
+            .post(body)
+            .apply { headers.forEach { (k, v) -> header(k, v) } }
+            .build()
+
+        withContext(Dispatchers.IO) {
+            http.newCall(request).execute().use { resp ->
+                if (!resp.isSuccessful && resp.code != 404 && resp.code != 409) {
+                    val bodyStr = resp.body?.string().orEmpty()
+                    error("cancel failed: status=${resp.code} ${bodyStr.take(300)}")
+                }
+            }
+        }
     }
 
     /** Upload local files into a DeerFlow thread before starting an AG-UI run. */
@@ -468,6 +504,8 @@ class AguiClient(
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS) // no read timeout for long-lived SSE
             .build()
+
+        fun newRunId(): String = newId("run")
 
         private fun newId(prefix: String): String =
             "$prefix-${System.nanoTime()}-${UUID.randomUUID().toString().replace("-", "").take(16)}"

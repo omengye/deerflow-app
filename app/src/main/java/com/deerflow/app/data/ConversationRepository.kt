@@ -28,10 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -40,6 +37,7 @@ import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import java.io.IOException
 import java.util.UUID
 
 /**
@@ -52,6 +50,11 @@ class ConversationRepository(
     private val settings: SettingsStore,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default),
 ) {
+    private data class RunSession(
+        val runId: String,
+        val lastEventId: String? = null,
+    )
+
     private val initialThreadId = newThreadId()
     private var currentThreadId: String = initialThreadId
     private val _state = MutableStateFlow(ConversationState(threadId = initialThreadId))
@@ -60,6 +63,7 @@ class ConversationRepository(
     private val mutex = Mutex()
     private val statesByThread = mutableMapOf(initialThreadId to _state.value)
     private val runJobsByThread = mutableMapOf<String, Job>()
+    private val runSessionsByThread = mutableMapOf<String, RunSession>()
     private val activeOperations = java.util.concurrent.atomic.AtomicInteger(0)
     private val deletedThreadIds = mutableSetOf<String>()
 
@@ -209,7 +213,7 @@ class ConversationRepository(
 
     fun deleteThread(threadId: String) {
         scope.launch {
-            val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
+            val jobToJoin = cancelRunJob(threadId, cancelBackend = true)
             jobToJoin?.cancel()
             jobToJoin?.join()
             mutex.withLock {
@@ -254,7 +258,7 @@ class ConversationRepository(
             mutex.withLock { updateForegroundServiceLocked() }
             try {
                 val threadId = mutex.withLock { currentThreadId }
-                val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
+                val jobToJoin = cancelRunJob(threadId, cancelBackend = true)
                 jobToJoin?.cancel()
                 jobToJoin?.join()
                 mutex.withLock {
@@ -312,7 +316,7 @@ class ConversationRepository(
             mutex.withLock { updateForegroundServiceLocked() }
             try {
                 val threadId = mutex.withLock { currentThreadId }
-                val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
+                val jobToJoin = cancelRunJob(threadId, cancelBackend = true)
                 jobToJoin?.cancel()
                 jobToJoin?.join()
                 mutex.withLock {
@@ -331,7 +335,7 @@ class ConversationRepository(
     fun cancel() {
         scope.launch {
             val threadId = mutex.withLock { currentThreadId }
-            val jobToJoin = mutex.withLock { runJobsByThread.remove(threadId) }
+            val jobToJoin = cancelRunJob(threadId, cancelBackend = true)
             jobToJoin?.cancel()
             jobToJoin?.join()
             mutex.withLock {
@@ -356,6 +360,8 @@ class ConversationRepository(
     private fun startRun(threadId: String, resume: List<ResumeEntry>) {
         val snapshot = statesByThread[threadId] ?: ConversationState(threadId = threadId)
         val historyToSend = snapshot.history
+        val runId = AguiClient.newRunId()
+        runSessionsByThread[threadId] = RunSession(runId = runId)
         updateThreadStateLocked(threadId) {
             snapshot.copy(
                 running = true,
@@ -369,66 +375,89 @@ class ConversationRepository(
             var lastSavedHistorySize = historyToSend.size
             val cfg = settings.current()
             val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
-            client.runStream(threadId, historyToSend, resume)
-                .retryWhen { cause, attempt ->
-                    if (cause is java.io.IOException && attempt < 3) {
-                        kotlinx.coroutines.delay(1000L * (attempt + 1))
-                        true
-                    } else {
-                        false
-                    }
-                }
-                .catch { e ->
-                    mutex.withLock {
-                        if (runJobsByThread[threadId] == myJob) {
-                            updateThreadStateLocked(threadId) {
-                                it.copy(running = false, status = "Stream error: ${e.message}")
-                                    .appendSystem(BlockKind.ERROR, "[RUN_ERROR]", e.message.orEmpty())
-                            }
-                        }
-                    }
-                }
-                .onCompletion {
-                    var shouldFetch = false
-                    mutex.withLock {
-                        if (runJobsByThread[threadId] == myJob) {
-                            runJobsByThread.remove(threadId)
-                            updateRunningThreadIdsLocked()
-                            updateThreadStateLocked(threadId) { if (it.running) it.copy(running = false, status = "Idle") else it }
-                            val meta = _threads.value.find { it.id == threadId }
-                            if (meta == null || !meta.isTitleFetched) {
-                                shouldFetch = true
-                                val currentMeta = _threads.value
-                                val existing = currentMeta.find { it.id == threadId }
-                                val updated = if (existing != null) {
-                                    currentMeta.filterNot { it.id == threadId } + existing.copy(isTitleFetched = true)
-                                } else {
-                                    currentMeta + ThreadMeta(threadId, "New Chat", System.currentTimeMillis(), isTitleFetched = true)
-                                }
-                                saveIndex(updated)
-                            }
-                        }
-                        updateForegroundServiceLocked()
-                    }
-                    scope.launch {
-                        syncThreadInfo(threadId, client, markTitleFetched = shouldFetch)
-                    }
-                }
-                .collect { event ->
-                    mutex.withLock {
-                        if (runJobsByThread[threadId] == myJob) {
-                            val currentState = statesByThread[threadId] ?: ConversationState(threadId = threadId)
-                            val nextState = ConversationReducer.reduce(currentState, event)
-                            if (nextState !== currentState) {
-                                updateThreadStateLocked(threadId) { nextState }
-                                if (shouldPersistRunEvent(event.type, lastSavedHistorySize, nextState.history.size)) {
-                                    lastSavedHistorySize = nextState.history.size
-                                    saveCurrentThread(nextState)
+            try {
+                var attempt = 0
+                var sawTerminalEvent = false
+                while (true) {
+                    val lastEventId = mutex.withLock { runSessionsByThread[threadId]?.lastEventId }
+                    try {
+                        client.runStream(threadId, runId, historyToSend, resume, lastEventId)
+                            .collect { event ->
+                                mutex.withLock {
+                                    if (runJobsByThread[threadId] == myJob) {
+                                        if (event.type == "RUN_FINISHED" || event.type == "RUN_CANCELLED" || event.type == "RUN_ERROR") {
+                                            sawTerminalEvent = true
+                                        }
+                                        val currentState = statesByThread[threadId] ?: ConversationState(threadId = threadId)
+                                        val nextState = ConversationReducer.reduce(currentState, event)
+                                        if (nextState !== currentState) {
+                                            updateThreadStateLocked(threadId) { nextState }
+                                            if (shouldPersistRunEvent(event.type, lastSavedHistorySize, nextState.history.size)) {
+                                                lastSavedHistorySize = nextState.history.size
+                                                saveCurrentThread(nextState)
+                                            }
+                                        }
+                                        event.sseId?.takeIf { it.isNotBlank() }?.let { sseId ->
+                                            val session = runSessionsByThread[threadId]
+                                            if (session?.runId == runId) {
+                                                runSessionsByThread[threadId] = session.copy(lastEventId = sseId)
+                                            }
+                                        }
+                                    }
                                 }
                             }
+                        if (!sawTerminalEvent && mutex.withLock { runJobsByThread[threadId] == myJob }) {
+                            throw IOException("stream ended before terminal event")
+                        }
+                        break
+                    } catch (e: IOException) {
+                        if (attempt >= MAX_STREAM_RECONNECT_ATTEMPTS) throw e
+                        attempt += 1
+                        mutex.withLock {
+                            if (runJobsByThread[threadId] == myJob) {
+                                updateThreadStateLocked(threadId) { it.copy(status = "Reconnecting stream... ($attempt/$MAX_STREAM_RECONNECT_ATTEMPTS)") }
+                            }
+                        }
+                        kotlinx.coroutines.delay(1000L * attempt)
+                    }
+                }
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                mutex.withLock {
+                    if (runJobsByThread[threadId] == myJob) {
+                        updateThreadStateLocked(threadId) {
+                            it.copy(running = false, status = "Stream error: ${e.message}")
+                                .appendSystem(BlockKind.ERROR, "[RUN_ERROR]", e.message.orEmpty())
                         }
                     }
                 }
+            } finally {
+                var shouldFetch = false
+                mutex.withLock {
+                    if (runJobsByThread[threadId] == myJob) {
+                        runJobsByThread.remove(threadId)
+                        runSessionsByThread.remove(threadId)
+                        updateRunningThreadIdsLocked()
+                        updateThreadStateLocked(threadId) { if (it.running) it.copy(running = false, status = "Idle") else it }
+                        val meta = _threads.value.find { it.id == threadId }
+                        if (meta == null || !meta.isTitleFetched) {
+                            shouldFetch = true
+                            val currentMeta = _threads.value
+                            val existing = currentMeta.find { it.id == threadId }
+                            val updated = if (existing != null) {
+                                currentMeta.filterNot { it.id == threadId } + existing.copy(isTitleFetched = true)
+                            } else {
+                                currentMeta + ThreadMeta(threadId, "New Chat", System.currentTimeMillis(), isTitleFetched = true)
+                            }
+                            saveIndex(updated)
+                        }
+                    }
+                    updateForegroundServiceLocked()
+                }
+                scope.launch {
+                    syncThreadInfo(threadId, client, markTitleFetched = shouldFetch)
+                }
+            }
         }
         runJobsByThread[threadId] = job
         updateRunningThreadIdsLocked()
@@ -487,6 +516,23 @@ class ConversationRepository(
 
     private fun updateRunningThreadIdsLocked() {
         _runningThreadIds.value = runJobsByThread.keys.toSet()
+    }
+
+    private suspend fun cancelRunJob(threadId: String, cancelBackend: Boolean): Job? {
+        val session = mutex.withLock { runSessionsByThread[threadId] }
+        if (cancelBackend && session != null) {
+            val cfg = settings.current()
+            runCatching { AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState()).cancelRun(session.runId) }
+        }
+        return mutex.withLock {
+            val currentSession = runSessionsByThread[threadId]
+            if (session == null || currentSession?.runId == session.runId) {
+                runSessionsByThread.remove(threadId)
+                runJobsByThread.remove(threadId)
+            } else {
+                null
+            }
+        }
     }
 
     private fun updateForegroundServiceLocked() {
@@ -585,6 +631,7 @@ class ConversationRepository(
             }
 
         private const val MAX_THREAD_HISTORY_FILE_BYTES = 1024 * 1024L
+        private const val MAX_STREAM_RECONNECT_ATTEMPTS = 3
         private fun newThreadId(): String = "thread-${UUID.randomUUID().toString().replace("-", "")}"
     }
 }
