@@ -60,7 +60,7 @@ Assistant messages are rendered with a built-in Markdown parser supporting:
 - Unordered and ordered lists
 - Fenced code blocks with monospace styling
 - Tables (header row + bordered cells)
-- Inline formatting: **bold**, *italic*, `code`
+- Inline formatting: **bold**, *italic*, `code`, and `[links](https://example.com)`
 
 ## Background streaming
 

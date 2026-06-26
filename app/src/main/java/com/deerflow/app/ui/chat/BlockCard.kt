@@ -57,12 +57,16 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.deerflow.app.domain.BlockKind
@@ -1020,7 +1024,7 @@ private fun MarkdownTable(
                         )
                     }
                     Text(
-                        text = header,
+                        text = parseMarkdownInline(header, scheme),
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Bold,
                         color = textColor,
@@ -1052,7 +1056,7 @@ private fun MarkdownTable(
                             )
                         }
                         Text(
-                            text = row.getOrElse(colIdx) { "" },
+                            text = parseMarkdownInline(row.getOrElse(colIdx) { "" }, scheme),
                             style = MaterialTheme.typography.bodySmall,
                             color = textColor.copy(alpha = 0.9f),
                             modifier = Modifier
@@ -1069,8 +1073,37 @@ private fun MarkdownTable(
 private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedString = buildAnnotatedString {
     var i = 0
     val len = text.length
+    val linkStyle = SpanStyle(
+        color = scheme.primary,
+        textDecoration = TextDecoration.Underline,
+        fontWeight = FontWeight.Medium,
+    )
     while (i < len) {
         when {
+            // Link: [label](https://example.com)
+            text[i] == '[' -> {
+                val labelEnd = text.indexOf(']', i + 1)
+                val urlStart = labelEnd + 1
+                if (labelEnd != -1 && urlStart < len && text[urlStart] == '(') {
+                    val urlEnd = text.indexOf(')', urlStart + 1)
+                    if (urlEnd != -1) {
+                        val label = text.substring(i + 1, labelEnd)
+                        val url = text.substring(urlStart + 1, urlEnd).trim()
+                        if (label.isNotEmpty() && isRenderableMarkdownUrl(url)) {
+                            withLink(
+                                LinkAnnotation.Url(
+                                    url = url,
+                                    styles = TextLinkStyles(style = linkStyle),
+                                )
+                            ) {
+                                append(label)
+                            }
+                            i = urlEnd + 1
+                            continue
+                        }
+                    }
+                }
+            }
             // Bold
             i + 3 < len && text.substring(i, i + 2) == "**" -> {
                 val end = text.indexOf("**", i + 2)
@@ -1118,4 +1151,8 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
         append(text[i])
         i++
     }
+}
+
+private fun isRenderableMarkdownUrl(url: String): Boolean {
+    return url.startsWith("http://") || url.startsWith("https://")
 }
