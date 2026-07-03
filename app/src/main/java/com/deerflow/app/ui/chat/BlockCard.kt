@@ -1,9 +1,13 @@
 package com.deerflow.app.ui.chat
 
 import android.content.ActivityNotFoundException
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
@@ -29,6 +33,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -41,6 +46,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -76,6 +82,7 @@ import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
 import com.deerflow.app.domain.UserDisplayText
 import com.deerflow.app.domain.model.AgentArtifact
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -417,6 +424,8 @@ private fun ArtifactCard(artifact: AgentArtifact, headers: Map<String, String>) 
     val scope = rememberCoroutineScope()
     var previewOpen by remember { mutableStateOf(false) }
     var opening by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var downloadProgress: Float? by remember { mutableStateOf<Float?>(null) }
     val isImage = artifact.kind == "image" || artifact.mimeType?.startsWith("image/") == true
 
     fun openExternal() {
@@ -436,6 +445,32 @@ private fun ArtifactCard(artifact: AgentArtifact, headers: Map<String, String>) 
                 }
             }.onFailure { error ->
                 Toast.makeText(context, "Open failed: ${error.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun save() {
+        if (downloading) return
+        scope.launch {
+            downloading = true
+            downloadProgress = null
+            val authHeaders = if (isImage) emptyMap() else headers
+            val result = runCatching {
+                saveToDownloads(
+                    context = context,
+                    displayName = artifact.name,
+                    mime = artifact.mimeType,
+                    url = artifact.url,
+                    authHeaders = authHeaders,
+                    onProgress = { v -> downloadProgress = v },
+                )
+            }
+            downloading = false
+            downloadProgress = null
+            result.onSuccess {
+                Toast.makeText(context, "Saved to Download/deerflow/${artifact.name}", Toast.LENGTH_LONG).show()
+            }.onFailure { error ->
+                Toast.makeText(context, "Save failed: ${error.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -487,21 +522,47 @@ private fun ArtifactCard(artifact: AgentArtifact, headers: Map<String, String>) 
                             maxLines = 1,
                         )
                         Text(
-                            text = if (opening) "Opening..." else artifact.mimeType ?: "file",
+                            text = when {
+                                downloading -> downloadProgress?.let { "Downloading... ${(it * 100).roundToInt()}%" } ?: "Downloading..."
+                                opening -> "Opening..."
+                                else -> artifact.mimeType ?: "file"
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = scheme.onSecondary.copy(alpha = 0.65f),
                             maxLines = 1,
                         )
                     }
                 }
-                Icon(
-                    imageVector = Icons.Default.OpenInNew,
-                    contentDescription = "Open artifact",
-                    tint = scheme.onSecondary.copy(alpha = 0.7f),
-                    modifier = Modifier
-                        .size(22.dp)
-                        .clickable { openExternal() },
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Download,
+                        contentDescription = "Save to Downloads",
+                        tint = scheme.onSecondary.copy(alpha = if (downloading) 0.3f else 0.7f),
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clickable { if (!downloading) save() },
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Icon(
+                        imageVector = Icons.Default.OpenInNew,
+                        contentDescription = "Open artifact",
+                        tint = scheme.onSecondary.copy(alpha = if (downloading) 0.3f else 0.7f),
+                        modifier = Modifier
+                            .size(22.dp)
+                            .clickable { if (!downloading) openExternal() },
+                    )
+                }
+            }
+            if (downloading) {
+                Spacer(Modifier.height(8.dp))
+                if (downloadProgress == null) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                } else {
+                    LinearProgressIndicator(
+                        progress = { downloadProgress ?: 0f },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         }
     }
@@ -562,6 +623,83 @@ private suspend fun downloadUrl(
     }
     FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }
+
+private suspend fun saveToDownloads(
+    context: Context,
+    displayName: String,
+    mime: String?,
+    url: String,
+    authHeaders: Map<String, String>,
+    onProgress: (Float) -> Unit,
+): Uri = withContext(Dispatchers.IO) {
+    val safeName = sanitizeArtifactFilename(displayName.ifBlank { "artifact" })
+    val finalMime = mime?.ifBlank { null } ?: guessMime(safeName)
+
+    val conn = URL(url).openConnection() as HttpURLConnection
+    authHeaders.forEach { (key, value) ->
+        if (key.isNotBlank()) conn.setRequestProperty(key, value)
+    }
+    conn.connectTimeout = 15_000
+    conn.readTimeout = 60_000
+    if (conn.responseCode !in 200..299) {
+        conn.disconnect()
+        throw IllegalStateException("HTTP ${conn.responseCode}")
+    }
+    val total = conn.contentLengthLong.takeIf { it > 0 }
+
+    try {
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+            put(MediaStore.Downloads.MIME_TYPE, finalMime)
+            put(MediaStore.Downloads.RELATIVE_PATH, "Download/deerflow/")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = context.contentResolver
+            .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("MediaStore insert failed")
+        var written = false
+        try {
+            context.contentResolver.openOutputStream(uri)?.use { out ->
+                conn.inputStream.use { input ->
+                    val buf = ByteArray(64 * 1024)
+                    var read = 0L
+                    var lastEmit = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        read += n
+                        if (total != null) {
+                            val now = SystemClock.elapsedRealtime()
+                            if (now - lastEmit > 100L || read >= total) {
+                                onProgress((read.toFloat() / total).coerceIn(0f, 1f))
+                                lastEmit = now
+                            }
+                        }
+                    }
+                    written = true
+                }
+            }
+        } finally {
+            if (written) {
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                context.contentResolver.update(uri, values, null, null)
+            } else {
+                context.contentResolver.delete(uri, null, null)
+            }
+        }
+        if (!written) throw IllegalStateException("Failed to write to MediaStore")
+        uri
+    } finally {
+        conn.disconnect()
+    }
+}
+
+private fun guessMime(name: String): String =
+    MimeTypeMap.getSingleton()
+        .getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(name))
+        ?: "application/octet-stream"
 
 @Composable
 private fun NetworkImage(
@@ -763,6 +901,8 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
     val scope = rememberCoroutineScope()
     var previewOpen by remember { mutableStateOf(false) }
     var opening by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var downloadProgress: Float? by remember { mutableStateOf<Float?>(null) }
     val renderableUrl = remember(block.url) {
         block.url.trim().takeIf { it.startsWith("http://") || it.startsWith("https://") }
     }
@@ -798,6 +938,31 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
         }
     }
 
+    fun save() {
+        if (downloading) return
+        scope.launch {
+            downloading = true
+            downloadProgress = null
+            val result = runCatching {
+                saveToDownloads(
+                    context = context,
+                    displayName = block.alt.ifBlank { "image" },
+                    mime = "image/*",
+                    url = renderableUrl,
+                    authHeaders = emptyMap(),
+                    onProgress = { v -> downloadProgress = v },
+                )
+            }
+            downloading = false
+            downloadProgress = null
+            result.onSuccess {
+                Toast.makeText(context, "Saved to Download/deerflow/", Toast.LENGTH_LONG).show()
+            }.onFailure { error ->
+                Toast.makeText(context, "Save failed: ${error.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
     NetworkImage(
         model = authenticatedImageRequest(context, renderableUrl, headers),
         contentDescription = block.alt,
@@ -815,22 +980,45 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
             onDismissRequest = { previewOpen = false },
             confirmButton = { TextButton(onClick = { previewOpen = false }) { Text("Close") } },
             dismissButton = {
-                TextButton(onClick = { openExternal() }) {
-                    Text(if (opening) "Opening..." else "Open")
+                Row {
+                    TextButton(onClick = { save() }, enabled = !downloading) {
+                        Text(
+                            when {
+                                downloading -> downloadProgress?.let { "${(it * 100).roundToInt()}%" } ?: "..."
+                                else -> "Save"
+                            }
+                        )
+                    }
+                    TextButton(onClick = { openExternal() }, enabled = !opening && !downloading) {
+                        Text(if (opening) "Opening..." else "Open")
+                    }
                 }
             },
             title = { Text(block.alt.ifBlank { "Image" }, maxLines = 1) },
             text = {
-                NetworkImage(
-                    model = authenticatedImageRequest(context, renderableUrl, headers),
-                    contentDescription = block.alt,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(360.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(scheme.surfaceVariant),
-                )
+                Column {
+                    NetworkImage(
+                        model = authenticatedImageRequest(context, renderableUrl, headers),
+                        contentDescription = block.alt,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(360.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(scheme.surfaceVariant),
+                    )
+                    if (downloading) {
+                        Spacer(Modifier.height(8.dp))
+                        if (downloadProgress == null) {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        } else {
+                            LinearProgressIndicator(
+                                progress = { downloadProgress ?: 0f },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
             },
         )
     }
