@@ -18,12 +18,39 @@ streaming events (text / reasoning / tool calls / interrupts).
 ```bash
 # Open the project in Android Studio and let it sync, OR from a shell with a
 # JDK 17 + Gradle available, generate the wrapper once:
-gradle wrapper --gradle-version 8.11.1
+gradle wrapper --gradle-version 9.5.1
 ./gradlew :app:installDebug
 ```
 
 > The Gradle wrapper JAR is not committed. Android Studio regenerates it on
 > first sync; from the CLI run `gradle wrapper` once (needs a local Gradle).
+
+## GitHub Actions APK builds
+
+The `.github/workflows/android-apk.yml` workflow builds a debug APK for every
+push, pull request, and manual run. The APK is uploaded as the
+`deerflow-debug-apk` workflow artifact.
+
+Pushing a tag that starts with `v`, for example `v1.0.0`, also builds a signed
+release APK and publishes it to GitHub Releases. Configure these repository
+secrets before creating a release tag:
+
+| Secret | Description |
+|---|---|
+| `ANDROID_KEYSTORE_BASE64` | Base64-encoded `.jks` or `.keystore` file |
+| `ANDROID_KEYSTORE_PASSWORD` | Keystore password |
+| `ANDROID_KEY_ALIAS` | Signing key alias |
+| `ANDROID_KEY_PASSWORD` | Signing key password |
+
+Example keystore encoding commands:
+
+```bash
+base64 -w 0 release-keystore.jks
+```
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("release-keystore.jks"))
+```
 
 ## Configuration
 
