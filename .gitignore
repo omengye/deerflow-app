@@ -33,6 +33,7 @@ local.properties
 # Keystores / Signing keys (to avoid committing secrets)
 *.jks
 *.keystore
+signed-app-key/
 
 # OS-specific files
 .DS_Store

@@ -17,7 +17,6 @@ import com.deerflow.app.domain.model.ChatMessage
 import com.deerflow.app.domain.model.ResumeEntry
 import com.deerflow.app.domain.model.ThreadMeta
 import com.deerflow.app.domain.model.ThreadStore
-import com.deerflow.app.domain.model.asMessageText
 import com.deerflow.app.domain.model.userMessage
 import com.deerflow.app.service.SseForegroundService
 import kotlinx.coroutines.CoroutineScope
@@ -38,6 +37,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 /**
@@ -170,23 +172,7 @@ class ConversationRepository(
                     val content = AguiJson.encodeToString(ThreadStore.serializer(), ThreadStore(messages = history, artifacts = state.artifacts))
                     file.writeText(content)
 
-                    // Update index
-                    val firstUserMsg = history.firstOrNull { it.role == com.deerflow.app.domain.model.Roles.USER }
-                        ?.content.asMessageText()
-                        ?.let(UserDisplayText::clean)
-                        ?.take(30)
-                        ?.trim()
-                    val title = if (firstUserMsg.isNullOrEmpty()) "New Chat" else firstUserMsg
-
-                    val currentMeta = _threads.value
-                    val existing = currentMeta.find { it.id == threadId }
-                    val updatedMeta = if (existing != null) {
-                        val finalTitle = if (existing.isTitleFetched) existing.title else title
-                        currentMeta.filterNot { it.id == threadId } + existing.copy(title = finalTitle, lastActive = System.currentTimeMillis())
-                    } else {
-                        currentMeta + ThreadMeta(threadId, title, System.currentTimeMillis(), isTitleFetched = false)
-                    }
-                    saveIndex(updatedMeta)
+                    ensureProvisionalThreadMetaLocked(threadId)
                 }
             }
         }
@@ -298,6 +284,7 @@ class ConversationRepository(
                             .copy(history = s.history + userMessage(promptText))
                     }
                     updateThreadStateLocked(threadId) { nextState }
+                    ensureProvisionalThreadMetaLocked(threadId)
                     saveCurrentThread(nextState)
                     startRun(threadId, emptyList())
                 }
@@ -440,22 +427,15 @@ class ConversationRepository(
                         updateRunningThreadIdsLocked()
                         updateThreadStateLocked(threadId) { if (it.running) it.copy(running = false, status = "Idle") else it }
                         val meta = _threads.value.find { it.id == threadId }
-                        if (meta == null || !meta.isTitleFetched) {
+                        if (meta == null || !meta.isTitleFetched || meta.title.isBlank()) {
                             shouldFetch = true
-                            val currentMeta = _threads.value
-                            val existing = currentMeta.find { it.id == threadId }
-                            val updated = if (existing != null) {
-                                currentMeta.filterNot { it.id == threadId } + existing.copy(isTitleFetched = true)
-                            } else {
-                                currentMeta + ThreadMeta(threadId, "New Chat", System.currentTimeMillis(), isTitleFetched = true)
-                            }
-                            saveIndex(updated)
+                            ensureProvisionalThreadMetaLocked(threadId)
                         }
                     }
                     updateForegroundServiceLocked()
                 }
                 scope.launch {
-                    syncThreadInfo(threadId, client, markTitleFetched = shouldFetch)
+                    syncThreadInfoAfterRun(threadId, client, waitForTitle = shouldFetch)
                 }
             }
         }
@@ -465,12 +445,43 @@ class ConversationRepository(
         job.start()
     }
 
+    private suspend fun syncThreadInfoAfterRun(
+        threadId: String,
+        client: AguiClient,
+        waitForTitle: Boolean,
+    ) {
+        if (!waitForTitle) {
+            syncThreadInfo(threadId, client)
+            return
+        }
+
+        for (attempt in 0 until TITLE_SYNC_ATTEMPTS) {
+            val hasTitle = syncThreadInfo(threadId, client, ensureProvisionalTitle = attempt == 0)
+            if (hasTitle) return
+            if (attempt < TITLE_SYNC_ATTEMPTS - 1) {
+                kotlinx.coroutines.delay(TITLE_SYNC_RETRY_DELAY_MS * (attempt + 1))
+            }
+        }
+    }
+
     private suspend fun syncThreadInfo(
         threadId: String,
         client: AguiClient,
-        markTitleFetched: Boolean = false,
-    ) {
-        val info = client.fetchThreadInfo(threadId) ?: return
+        ensureProvisionalTitle: Boolean = false,
+    ): Boolean {
+        val info = client.fetchThreadInfo(threadId)
+        if (info == null) {
+            if (ensureProvisionalTitle) {
+                mutex.withLock {
+                    if (threadId !in deletedThreadIds) {
+                        ensureProvisionalThreadMetaLocked(threadId)
+                    }
+                }
+            }
+            return false
+        }
+
+        var hasServerTitle = false
         mutex.withLock {
             if (threadId in deletedThreadIds) return@withLock
             if (info.artifacts.isNotEmpty()) {
@@ -478,26 +489,57 @@ class ConversationRepository(
                 statesByThread[threadId]?.let(::saveCurrentThread)
             }
             val title = info.title?.trim().orEmpty()
-            if (title.isNotEmpty() || markTitleFetched) {
+            hasServerTitle = title.isNotEmpty()
+            if (hasServerTitle) {
                 val currentMeta = _threads.value
                 val existing = currentMeta.find { it.id == threadId }
                 val updated = if (existing != null) {
                     currentMeta.filterNot { it.id == threadId } + existing.copy(
-                        title = title.ifEmpty { existing.title },
-                        isTitleFetched = existing.isTitleFetched || markTitleFetched || title.isNotEmpty(),
+                        title = title,
+                        isTitleFetched = true,
                     )
                 } else {
                     currentMeta + ThreadMeta(
                         id = threadId,
-                        title = title.ifEmpty { "New Chat" },
+                        title = title,
                         lastActive = System.currentTimeMillis(),
-                        isTitleFetched = markTitleFetched || title.isNotEmpty(),
+                        isTitleFetched = true,
                     )
                 }
                 saveIndex(updated)
+            } else if (ensureProvisionalTitle) {
+                ensureProvisionalThreadMetaLocked(threadId)
             }
         }
+        return hasServerTitle
     }
+
+    private fun ensureProvisionalThreadMetaLocked(threadId: String, nowMillis: Long = System.currentTimeMillis()) {
+        if (threadId in deletedThreadIds) return
+
+        val currentMeta = _threads.value
+        val existing = currentMeta.find { it.id == threadId }
+        val updated = if (existing != null) {
+            val hasFetchedTitle = existing.isTitleFetched && existing.title.isNotBlank()
+            val title = existing.title.takeIf { it.isNotBlank() } ?: provisionalThreadTitle(nowMillis)
+            currentMeta.filterNot { it.id == threadId } + existing.copy(
+                title = title,
+                lastActive = nowMillis,
+                isTitleFetched = hasFetchedTitle,
+            )
+        } else {
+            currentMeta + ThreadMeta(
+                id = threadId,
+                title = provisionalThreadTitle(nowMillis),
+                lastActive = nowMillis,
+                isTitleFetched = false,
+            )
+        }
+        saveIndex(updated)
+    }
+
+    private fun provisionalThreadTitle(nowMillis: Long): String =
+        THREAD_TITLE_FORMATTER.format(Instant.ofEpochMilli(nowMillis).atZone(ZoneId.systemDefault()))
 
     private fun setCurrentThreadLocked(threadId: String, state: ConversationState) {
         currentThreadId = threadId
@@ -632,6 +674,9 @@ class ConversationRepository(
 
         private const val MAX_THREAD_HISTORY_FILE_BYTES = 1024 * 1024L
         private const val MAX_STREAM_RECONNECT_ATTEMPTS = 3
+        private const val TITLE_SYNC_ATTEMPTS = 4
+        private const val TITLE_SYNC_RETRY_DELAY_MS = 1000L
+        private val THREAD_TITLE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
         private fun newThreadId(): String = "thread-${UUID.randomUUID().toString().replace("-", "")}"
     }
 }
