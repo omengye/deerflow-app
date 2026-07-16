@@ -2,6 +2,7 @@ package com.deerflow.app.data
 
 import android.content.Context
 import com.deerflow.app.data.agui.AguiClient
+import com.deerflow.app.data.agui.AguiHttpException
 import com.deerflow.app.data.agui.UploadFilePart
 import com.deerflow.app.data.agui.UploadedFile
 import com.deerflow.app.data.agui.AguiJson
@@ -34,6 +35,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.io.IOException
@@ -52,17 +54,15 @@ class ConversationRepository(
     private val settings: SettingsStore,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default),
 ) {
-    private data class RunSession(
-        val runId: String,
-        val lastEventId: String? = null,
-    )
-
     private val initialThreadId = newThreadId()
     private var currentThreadId: String = initialThreadId
     private val _state = MutableStateFlow(ConversationState(threadId = initialThreadId))
     val state: StateFlow<ConversationState> = _state.asStateFlow()
 
     private val mutex = Mutex()
+    private val threadsDir = appContext.filesDir.resolve("threads").also { it.mkdirs() }
+    private val indexFile = threadsDir.resolve("threads_index.json")
+    private val runSessionStore = RunSessionStore(threadsDir.resolve("active_run_sessions.json"))
     private val statesByThread = mutableMapOf(initialThreadId to _state.value)
     private val runJobsByThread = mutableMapOf<String, Job>()
     private val runSessionsByThread = mutableMapOf<String, RunSession>()
@@ -71,9 +71,6 @@ class ConversationRepository(
 
     private val _runningThreadIds = MutableStateFlow<Set<String>>(emptySet())
     val runningThreadIds: StateFlow<Set<String>> = _runningThreadIds.asStateFlow()
-
-    private val threadsDir = appContext.filesDir.resolve("threads").also { it.mkdirs() }
-    private val indexFile = threadsDir.resolve("threads_index.json")
 
     private val _threads = MutableStateFlow<List<ThreadMeta>>(emptyList())
     val threads: StateFlow<List<ThreadMeta>> = _threads.asStateFlow()
@@ -93,12 +90,47 @@ class ConversationRepository(
                     statesByThread[recent.id] = loaded
                     setCurrentThreadLocked(recent.id, loaded)
                 }
+                recoverPersistedRunsLocked()
             }
             recentThreadId?.let { threadId ->
                 val cfg = settings.current()
                 syncThreadInfo(threadId, AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState()))
             }
         }
+    }
+
+    private fun recoverPersistedRunsLocked() {
+        val now = System.currentTimeMillis()
+        val sessions = runSessionStore.load()
+            .filter { now - it.updatedAtEpochMillis <= RUN_SESSION_METADATA_RETENTION_MS }
+            .map { session ->
+                session.copy(
+                    reconnectUntilEpochMillis = now + STREAM_RECONNECT_WINDOW_MS,
+                    updatedAtEpochMillis = now,
+                )
+            }
+
+        runSessionsByThread.clear()
+        sessions.forEach { session ->
+            if (session.threadId in deletedThreadIds) return@forEach
+            runSessionsByThread[session.threadId] = session
+            val loaded = statesByThread[session.threadId]
+                ?: loadThreadInternal(session.threadId).also { statesByThread[session.threadId] = it }
+            updateThreadStateLocked(session.threadId) {
+                loaded.copy(
+                    running = true,
+                    status = "Restoring agent stream...",
+                    replay = ReplayState.from(loaded.history),
+                )
+            }
+            ensureProvisionalThreadMetaLocked(session.threadId)
+            launchRunSessionLocked(session, recovering = true)
+        }
+        saveRunSessionsLocked()
+    }
+
+    private fun saveRunSessionsLocked() {
+        runSessionStore.save(runSessionsByThread.values)
     }
 
     private fun loadIndex() {
@@ -346,13 +378,30 @@ class ConversationRepository(
 
     private fun startRun(threadId: String, resume: List<ResumeEntry>) {
         val snapshot = statesByThread[threadId] ?: ConversationState(threadId = threadId)
-        val historyToSend = snapshot.history
-        val runId = AguiClient.newRunId()
-        runSessionsByThread[threadId] = RunSession(runId = runId)
+        val now = System.currentTimeMillis()
+        val session = RunSession(
+            threadId = threadId,
+            runId = AguiClient.newRunId(),
+            history = snapshot.history,
+            resume = resume,
+            reconnectUntilEpochMillis = now + STREAM_RECONNECT_WINDOW_MS,
+            updatedAtEpochMillis = now,
+        )
+        runSessionsByThread[threadId] = session
+        saveRunSessionsLocked()
+        launchRunSessionLocked(session, recovering = false)
+    }
+
+    private fun launchRunSessionLocked(session: RunSession, recovering: Boolean) {
+        val threadId = session.threadId
+        val runId = session.runId
+        val historyToSend = session.history
+        val resume = session.resume
+        val snapshot = statesByThread[threadId] ?: ConversationState(threadId = threadId)
         updateThreadStateLocked(threadId) {
             snapshot.copy(
                 running = true,
-                status = "Starting run...",
+                status = if (recovering) "Restoring agent stream..." else "Starting run...",
                 replay = ReplayState.from(snapshot.history),
             )
         }
@@ -362,16 +411,27 @@ class ConversationRepository(
             var lastSavedHistorySize = historyToSend.size
             val cfg = settings.current()
             val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
+            var retryAttempt = 0
+            var reconnecting = recovering
+            var reconnectDeadline = if (recovering) {
+                System.currentTimeMillis() + STREAM_RECONNECT_WINDOW_MS
+            } else {
+                session.reconnectUntilEpochMillis
+            }
             try {
-                var attempt = 0
                 var sawTerminalEvent = false
                 while (true) {
-                    val lastEventId = mutex.withLock { runSessionsByThread[threadId]?.lastEventId }
+                    val lastEventId = mutex.withLock {
+                        runSessionsByThread[threadId]?.lastEventId
+                    }
+                    val resumeEventId = lastEventId ?: if (recovering || reconnecting || retryAttempt > 0) INITIAL_REPLAY_CURSOR else null
                     try {
-                        client.runStream(threadId, runId, historyToSend, resume, lastEventId)
+                        client.runStream(threadId, runId, historyToSend, resume, resumeEventId)
                             .collect { event ->
                                 mutex.withLock {
                                     if (runJobsByThread[threadId] == myJob) {
+                                        retryAttempt = 0
+                                        reconnecting = false
                                         if (event.type == "RUN_FINISHED" || event.type == "RUN_CANCELLED" || event.type == "RUN_ERROR") {
                                             sawTerminalEvent = true
                                         }
@@ -387,7 +447,13 @@ class ConversationRepository(
                                         event.sseId?.takeIf { it.isNotBlank() }?.let { sseId ->
                                             val session = runSessionsByThread[threadId]
                                             if (session?.runId == runId) {
-                                                runSessionsByThread[threadId] = session.copy(lastEventId = sseId)
+                                                val now = System.currentTimeMillis()
+                                                runSessionsByThread[threadId] = session.copy(
+                                                    lastEventId = sseId,
+                                                    reconnectUntilEpochMillis = now + STREAM_RECONNECT_WINDOW_MS,
+                                                    updatedAtEpochMillis = now,
+                                                )
+                                                saveRunSessionsLocked()
                                             }
                                         }
                                     }
@@ -398,23 +464,49 @@ class ConversationRepository(
                         }
                         break
                     } catch (e: IOException) {
-                        if (attempt >= MAX_STREAM_RECONNECT_ATTEMPTS) throw e
-                        attempt += 1
-                        mutex.withLock {
-                            if (runJobsByThread[threadId] == myJob) {
-                                updateThreadStateLocked(threadId) { it.copy(status = "Reconnecting stream... ($attempt/$MAX_STREAM_RECONNECT_ATTEMPTS)") }
+                        if (e is AguiHttpException && !e.isRetryable) throw e
+                        val now = System.currentTimeMillis()
+                        if (!reconnecting) {
+                            reconnecting = true
+                            reconnectDeadline = now + STREAM_RECONNECT_WINDOW_MS
+                            mutex.withLock {
+                                val current = runSessionsByThread[threadId]
+                                if (current?.runId == runId) {
+                                    runSessionsByThread[threadId] = current.copy(
+                                        reconnectUntilEpochMillis = reconnectDeadline,
+                                        updatedAtEpochMillis = now,
+                                    )
+                                    saveRunSessionsLocked()
+                                }
                             }
                         }
-                        kotlinx.coroutines.delay(1000L * attempt)
+                        if (now >= reconnectDeadline) throw e
+                        retryAttempt += 1
+                        val remainingMillis = reconnectDeadline - now
+                        val delayMillis = minOf(reconnectDelayMillis(retryAttempt), remainingMillis)
+                        mutex.withLock {
+                            if (runJobsByThread[threadId] == myJob) {
+                                val remainingSeconds = ((remainingMillis + 999L) / 1000L).coerceAtLeast(1L)
+                                updateThreadStateLocked(threadId) {
+                                    it.copy(status = "Reconnecting stream... (${remainingSeconds}s remaining)")
+                                }
+                            }
+                        }
+                        kotlinx.coroutines.delay(delayMillis)
                     }
                 }
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 mutex.withLock {
                     if (runJobsByThread[threadId] == myJob) {
-                        updateThreadStateLocked(threadId) {
-                            it.copy(running = false, status = "Stream error: ${e.message}")
-                                .appendSystem(BlockKind.ERROR, "[RUN_ERROR]", e.message.orEmpty())
+                        updateThreadStateLocked(threadId) { state ->
+                            if (e is AguiHttpException && e.statusCode == 410) {
+                                state.copy(running = false, status = "Replay expired; refresh the thread to load the final result")
+                                    .appendSystem(BlockKind.ERROR, "[REPLAY_EXPIRED]", "The saved stream can no longer be replayed.")
+                            } else {
+                                state.copy(running = false, status = "Stream error: ${e.message}")
+                                    .appendSystem(BlockKind.ERROR, "[RUN_ERROR]", e.message.orEmpty())
+                            }
                         }
                     }
                 }
@@ -424,6 +516,7 @@ class ConversationRepository(
                     if (runJobsByThread[threadId] == myJob) {
                         runJobsByThread.remove(threadId)
                         runSessionsByThread.remove(threadId)
+                        saveRunSessionsLocked()
                         updateRunningThreadIdsLocked()
                         updateThreadStateLocked(threadId) { if (it.running) it.copy(running = false, status = "Idle") else it }
                         val meta = _threads.value.find { it.id == threadId }
@@ -484,9 +577,26 @@ class ConversationRepository(
         var hasServerTitle = false
         mutex.withLock {
             if (threadId in deletedThreadIds) return@withLock
+            if (info.messages.isNotEmpty()) {
+                val snapshotEvent = AguiEvent(
+                    type = "MESSAGES_SNAPSHOT",
+                    raw = JsonObject(mapOf("messages" to JsonArray(info.messages))),
+                )
+                updateThreadStateLocked(threadId) { current ->
+                    ConversationReducer.reduce(current, snapshotEvent)
+                }
+                statesByThread[threadId]?.let(::saveCurrentThread)
+            }
             if (info.artifacts.isNotEmpty()) {
                 updateThreadStateLocked(threadId) { it.appendArtifacts(info.artifacts) }
                 statesByThread[threadId]?.let(::saveCurrentThread)
+            }
+            updateThreadStateLocked(threadId) { current ->
+                if (!current.running && current.status.startsWith("Replay expired")) {
+                    current.copy(status = "Idle")
+                } else {
+                    current
+                }
             }
             val title = info.title?.trim().orEmpty()
             hasServerTitle = title.isNotEmpty()
@@ -570,7 +680,9 @@ class ConversationRepository(
             val currentSession = runSessionsByThread[threadId]
             if (session == null || currentSession?.runId == session.runId) {
                 runSessionsByThread.remove(threadId)
-                runJobsByThread.remove(threadId)
+                val job = runJobsByThread.remove(threadId)
+                saveRunSessionsLocked()
+                job
             } else {
                 null
             }
@@ -673,10 +785,19 @@ class ConversationRepository(
             }
 
         private const val MAX_THREAD_HISTORY_FILE_BYTES = 1024 * 1024L
-        private const val MAX_STREAM_RECONNECT_ATTEMPTS = 3
+        private const val STREAM_RECONNECT_WINDOW_MS = 10 * 60 * 1000L
+        private const val RUN_SESSION_METADATA_RETENTION_MS = 60 * 60 * 1000L
+        private const val INITIAL_REPLAY_CURSOR = "0-0"
+        private const val INITIAL_RECONNECT_DELAY_MS = 1000L
+        private const val MAX_RECONNECT_DELAY_MS = 30_000L
         private const val TITLE_SYNC_ATTEMPTS = 4
         private const val TITLE_SYNC_RETRY_DELAY_MS = 1000L
         private val THREAD_TITLE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
         private fun newThreadId(): String = "thread-${UUID.randomUUID().toString().replace("-", "")}"
+
+        private fun reconnectDelayMillis(attempt: Int): Long {
+            val shift = (attempt - 1).coerceIn(0, 5)
+            return (INITIAL_RECONNECT_DELAY_MS shl shift).coerceAtMost(MAX_RECONNECT_DELAY_MS)
+        }
     }
 }

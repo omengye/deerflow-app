@@ -29,6 +29,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import okio.source
 import java.io.InputStream
+import java.io.IOException
 import java.net.URLConnection
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -69,13 +70,23 @@ data class UploadResponse(
 @Serializable
 private data class ThreadDetailResponse(
     val title: String? = null,
+    val messages: List<JsonObject> = emptyList(),
     val artifacts: List<kotlinx.serialization.json.JsonElement> = emptyList(),
 )
 
 data class ThreadInfo(
     val title: String? = null,
+    val messages: List<JsonObject> = emptyList(),
     val artifacts: List<AgentArtifact> = emptyList(),
 )
+
+class AguiHttpException(
+    val statusCode: Int,
+    responseSnippet: String,
+) : IOException("run request failed: status=$statusCode $responseSnippet") {
+    val isRetryable: Boolean
+        get() = statusCode == 408 || statusCode == 425 || statusCode == 429 || statusCode >= 500
+}
 
 /**
  * AG-UI HTTP/SSE streaming client. Kotlin port of internal/agui/client.go.
@@ -215,7 +226,7 @@ class AguiClient(
             call.execute().use { resp ->
                 if (!resp.isSuccessful) {
                     val snippet = resp.body?.source()?.readUtf8Line().orEmpty()
-                    error("run request failed: status=${resp.code} $snippet")
+                    throw AguiHttpException(resp.code, snippet)
                 }
                 val reader = resp.body?.charStream() ?: error("empty response body")
                 val dataLines = StringBuilder()
@@ -449,11 +460,22 @@ class AguiClient(
                     val detail = AguiJson.decodeFromString(ThreadDetailResponse.serializer(), bodyStr)
                     ThreadInfo(
                         title = detail.title,
+                        messages = detail.messages.map(::normalizeThreadMessage),
                         artifacts = detail.artifacts.mapNotNull { artifactFromThreadDetail(threadId, it) },
                     )
                 }
             }.getOrNull()
         }
+    }
+
+    private fun normalizeThreadMessage(raw: JsonObject): JsonObject {
+        val role = Roles.normalize(raw.str("role") ?: raw.str("type"))
+        return JsonObject(raw.toMutableMap().also { fields ->
+            fields["role"] = JsonPrimitive(role)
+            if ("toolCallId" !in fields) {
+                raw.str("tool_call_id")?.let { fields["toolCallId"] = JsonPrimitive(it) }
+            }
+        })
     }
 
 
