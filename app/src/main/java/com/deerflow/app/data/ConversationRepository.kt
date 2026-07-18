@@ -1,6 +1,8 @@
 package com.deerflow.app.data
 
 import android.content.Context
+import android.os.SystemClock
+import android.util.Log
 import com.deerflow.app.data.agui.AguiClient
 import com.deerflow.app.data.agui.AguiHttpException
 import com.deerflow.app.data.agui.UploadFilePart
@@ -54,6 +56,7 @@ class ConversationRepository(
     private val settings: SettingsStore,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default),
 ) {
+    private val networkMonitor = NetworkMonitor(appContext)
     private val initialThreadId = newThreadId()
     private var currentThreadId: String = initialThreadId
     private val _state = MutableStateFlow(ConversationState(threadId = initialThreadId))
@@ -413,10 +416,37 @@ class ConversationRepository(
             val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
             var retryAttempt = 0
             var reconnecting = recovering
-            var reconnectDeadline = if (recovering) {
-                System.currentTimeMillis() + STREAM_RECONNECT_WINDOW_MS
-            } else {
-                session.reconnectUntilEpochMillis
+            var reconnectDeadlineElapsedMillis = if (recovering) {
+                SystemClock.elapsedRealtime() + STREAM_RECONNECT_WINDOW_MS
+            } else 0L
+            var reconnectCountdownJob: Job? = null
+
+            fun stopReconnectCountdown() {
+                reconnectCountdownJob?.cancel()
+                reconnectCountdownJob = null
+            }
+
+            fun startReconnectCountdown() {
+                if (reconnectDeadlineElapsedMillis <= 0L || reconnectCountdownJob?.isActive == true) return
+                reconnectCountdownJob = scope.launch {
+                    while (true) {
+                        val remainingMillis = reconnectDeadlineElapsedMillis - SystemClock.elapsedRealtime()
+                        if (remainingMillis <= 0L) return@launch
+                        val remainingSeconds = ((remainingMillis + 999L) / 1000L).coerceAtLeast(1L)
+                        mutex.withLock {
+                            if (runJobsByThread[threadId] != myJob || !reconnecting) return@withLock
+                            val prefix = if (networkMonitor.isAvailable.value) {
+                                "Reconnecting stream..."
+                            } else {
+                                "Waiting for network..."
+                            }
+                            updateThreadStateLocked(threadId) {
+                                it.copy(status = "$prefix (${remainingSeconds}s remaining)")
+                            }
+                        }
+                        kotlinx.coroutines.delay(RECONNECT_COUNTDOWN_TICK_MS)
+                    }
+                }
             }
             try {
                 var sawTerminalEvent = false
@@ -426,12 +456,21 @@ class ConversationRepository(
                     }
                     val resumeEventId = lastEventId ?: if (recovering || reconnecting || retryAttempt > 0) INITIAL_REPLAY_CURSOR else null
                     try {
+                        if (reconnecting && !networkMonitor.isAvailable.value) {
+                            startReconnectCountdown()
+                            val remainingMillis = reconnectDeadlineElapsedMillis - SystemClock.elapsedRealtime()
+                            if (!networkMonitor.awaitAvailable(remainingMillis)) {
+                                throw IOException("Network unavailable until reconnect deadline")
+                            }
+                        }
                         client.runStream(threadId, runId, historyToSend, resume, resumeEventId)
                             .collect { event ->
                                 mutex.withLock {
                                     if (runJobsByThread[threadId] == myJob) {
                                         retryAttempt = 0
                                         reconnecting = false
+                                        reconnectDeadlineElapsedMillis = 0L
+                                        stopReconnectCountdown()
                                         if (event.type == "RUN_FINISHED" || event.type == "RUN_CANCELLED" || event.type == "RUN_ERROR") {
                                             sawTerminalEvent = true
                                         }
@@ -464,35 +503,35 @@ class ConversationRepository(
                         }
                         break
                     } catch (e: IOException) {
+                        Log.w(LOG_TAG, "AG-UI stream connection failed for run=$runId: ${e.javaClass.simpleName}: ${e.message}")
                         if (e is AguiHttpException && !e.isRetryable) throw e
-                        val now = System.currentTimeMillis()
+                        val nowElapsed = SystemClock.elapsedRealtime()
                         if (!reconnecting) {
                             reconnecting = true
-                            reconnectDeadline = now + STREAM_RECONNECT_WINDOW_MS
+                            reconnectDeadlineElapsedMillis = nowElapsed + STREAM_RECONNECT_WINDOW_MS
+                            val reconnectUntilEpochMillis = System.currentTimeMillis() + STREAM_RECONNECT_WINDOW_MS
                             mutex.withLock {
                                 val current = runSessionsByThread[threadId]
                                 if (current?.runId == runId) {
                                     runSessionsByThread[threadId] = current.copy(
-                                        reconnectUntilEpochMillis = reconnectDeadline,
-                                        updatedAtEpochMillis = now,
+                                        reconnectUntilEpochMillis = reconnectUntilEpochMillis,
+                                        updatedAtEpochMillis = System.currentTimeMillis(),
                                     )
                                     saveRunSessionsLocked()
                                 }
                             }
                         }
-                        if (now >= reconnectDeadline) throw e
+                        startReconnectCountdown()
+                        val remainingMillis = reconnectDeadlineElapsedMillis - SystemClock.elapsedRealtime()
+                        if (remainingMillis <= 0L) throw e
                         retryAttempt += 1
-                        val remainingMillis = reconnectDeadline - now
                         val delayMillis = minOf(reconnectDelayMillis(retryAttempt), remainingMillis)
-                        mutex.withLock {
-                            if (runJobsByThread[threadId] == myJob) {
-                                val remainingSeconds = ((remainingMillis + 999L) / 1000L).coerceAtLeast(1L)
-                                updateThreadStateLocked(threadId) {
-                                    it.copy(status = "Reconnecting stream... (${remainingSeconds}s remaining)")
-                                }
-                            }
+                        val ready = if (networkMonitor.isAvailable.value) {
+                            networkMonitor.awaitRetry(delayMillis, remainingMillis)
+                        } else {
+                            networkMonitor.awaitAvailable(remainingMillis)
                         }
-                        kotlinx.coroutines.delay(delayMillis)
+                        if (!ready) throw e
                     }
                 }
             } catch (e: Throwable) {
@@ -511,6 +550,7 @@ class ConversationRepository(
                     }
                 }
             } finally {
+                stopReconnectCountdown()
                 var shouldFetch = false
                 mutex.withLock {
                     if (runJobsByThread[threadId] == myJob) {
@@ -790,9 +830,11 @@ class ConversationRepository(
         private const val INITIAL_REPLAY_CURSOR = "0-0"
         private const val INITIAL_RECONNECT_DELAY_MS = 1000L
         private const val MAX_RECONNECT_DELAY_MS = 30_000L
+        private const val RECONNECT_COUNTDOWN_TICK_MS = 1000L
         private const val TITLE_SYNC_ATTEMPTS = 4
         private const val TITLE_SYNC_RETRY_DELAY_MS = 1000L
         private val THREAD_TITLE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+        private const val LOG_TAG = "DeerFlowStream"
         private fun newThreadId(): String = "thread-${UUID.randomUUID().toString().replace("-", "")}"
 
         private fun reconnectDelayMillis(attempt: Int): Long {

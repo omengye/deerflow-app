@@ -523,8 +523,9 @@ class AguiClient(
         private const val MAX_SSE_LINE_BUFFER_CHARS = 64 * 1024
 
         private val defaultHttp: OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS) // no read timeout for long-lived SSE
+            .retryOnConnectionFailure(true)
             .build()
 
         fun newRunId(): String = newId("run")
