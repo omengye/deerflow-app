@@ -75,6 +75,20 @@ or delete them. Each thread's messages are persisted to the device filesystem
 
 You can select files or capture photos directly inside the app to send to the Agent. Tap the **+** (Add) icon next to the input bar to upload local documents or capture a photo using the device camera. Selected attachments are displayed as chips and can be removed before submission. When sending, the app uploads files to the thread (`POST /api/threads/{threadId}/uploads`) and injects their virtual paths into the prompt inside a `<uploaded_files_from_android>` block. In the chat history UI, these raw path blocks are cleaned up and replaced with a neat `附件：[filename]` badge.
 
+## Skill Proposal approvals
+
+When connected to this project's DeerFlow API with authentication enabled, the
+top-bar review icon opens the Proposal approval center. Pending Proposals that
+originated in the current thread also appear as interactive chat cards. You can
+inspect the diff and security scan results, add an optional review note, reject
+the Proposal, or approve and immediately publish it.
+
+The feature reuses the configured `Authorization` header and the existing
+`/api/admin/evolution/proposals` endpoints. Keep backend `auth_enabled` set to
+`true`; the Admin API is intentionally unavailable when authentication is off.
+The app refreshes Proposal state while it is in the foreground, so reviews made
+through another connected channel are reflected automatically.
+
 ## Thread title synchronization
 
 The client automatically keeps thread titles in sync with the backend. Once an agent run finishes, if the thread does not have a fetched title, the app runs a background request (`GET /api/threads/{threadId}`) to fetch the server-generated thread title and updates the local history index.

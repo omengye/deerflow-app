@@ -41,9 +41,12 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.automirrored.filled.Rule
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
@@ -84,7 +87,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.FileProvider
 import com.deerflow.app.R
 import com.deerflow.app.data.PendingAttachment
+import com.deerflow.app.data.proposal.SkillProposal
 import com.deerflow.app.domain.ConversationState
+import com.deerflow.app.ui.proposal.ProposalCard
+import com.deerflow.app.ui.proposal.ProposalViewModel
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.Locale
@@ -93,9 +99,12 @@ import java.util.Locale
 @Composable
 fun ChatScreen(
     vm: ChatViewModel,
+    proposalVm: ProposalViewModel,
+    onOpenApprovals: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val proposalState by proposalVm.state.collectAsStateWithLifecycle()
     val artifactHeaders by vm.artifactHeaders.collectAsStateWithLifecycle()
     val scheme = MaterialTheme.colorScheme
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -103,6 +112,24 @@ fun ChatScreen(
     val context = LocalContext.current
     var attachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
     var pendingCameraAttachment by remember { mutableStateOf<PendingAttachment?>(null) }
+    val threadProposals = remember(proposalState.proposals, state.threadId) {
+        proposalState.proposals
+            .filter { it.trigger.threadId == state.threadId }
+            .sortedWith(
+                compareByDescending<SkillProposal> { it.status == "pending_review" }
+                    .thenByDescending { it.createdAt },
+            )
+            .take(MAX_THREAD_PROPOSAL_CARDS)
+    }
+
+    LaunchedEffect(state.running) {
+        if (!state.running) proposalVm.refresh()
+    }
+    LaunchedEffect(proposalState.error, proposalState.notice) {
+        val message = proposalState.error ?: proposalState.notice ?: return@LaunchedEffect
+        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        proposalVm.clearMessage()
+    }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -243,6 +270,10 @@ fun ChatScreen(
                         }
                     },
                     actions = {
+                        ProposalInboxButton(
+                            pendingCount = proposalState.pendingCount,
+                            onClick = onOpenApprovals,
+                        )
                         IconButton(onClick = onOpenSettings) {
                             Icon(Icons.Default.Settings, contentDescription = "Settings", tint = scheme.onBackground.copy(alpha = 0.7f))
                         }
@@ -283,7 +314,19 @@ fun ChatScreen(
                 }
             },
         ) { padding ->
-            Transcript(state, artifactHeaders, Modifier.padding(padding))
+            Transcript(
+                state = state,
+                artifactHeaders = artifactHeaders,
+                proposals = threadProposals,
+                actionProposalId = proposalState.actionProposalId,
+                onViewProposal = { proposalId ->
+                    proposalVm.select(proposalId)
+                    onOpenApprovals()
+                },
+                onApproveProposal = proposalVm::approve,
+                onRejectProposal = proposalVm::reject,
+                modifier = Modifier.padding(padding),
+            )
         }
     }
 }
@@ -292,16 +335,22 @@ fun ChatScreen(
 private fun Transcript(
     state: ConversationState,
     artifactHeaders: Map<String, String>,
+    proposals: List<SkillProposal>,
+    actionProposalId: String?,
+    onViewProposal: (String) -> Unit,
+    onApproveProposal: (String, String?) -> Unit,
+    onRejectProposal: (String, String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
+    val itemCount = state.blocks.size + proposals.size
 
     // Auto-scroll when new blocks are appended, but avoid restarting animations for every streamed content chunk.
-    LaunchedEffect(state.blocks.size) {
-        if (state.blocks.isNotEmpty()) listState.animateScrollToItem(state.blocks.lastIndex)
+    LaunchedEffect(itemCount) {
+        if (itemCount > 0) listState.animateScrollToItem(itemCount - 1)
     }
 
-    if (state.blocks.isEmpty()) {
+    if (state.blocks.isEmpty() && proposals.isEmpty()) {
         Column(
             modifier = modifier.fillMaxSize().padding(horizontal = 24.dp),
             verticalArrangement = Arrangement.Center,
@@ -342,8 +391,39 @@ private fun Transcript(
         items(state.blocks, key = { it.key }) { block ->
             BlockCard(block, artifactHeaders = artifactHeaders)
         }
+        items(proposals, key = { "proposal:${it.id}" }) { proposal ->
+            ProposalCard(
+                proposal = proposal,
+                busy = actionProposalId == proposal.id,
+                compact = true,
+                onView = { onViewProposal(proposal.id) },
+                onApprove = { onApproveProposal(proposal.id, null) },
+                onReject = { onRejectProposal(proposal.id, null) },
+            )
+        }
     }
 }
+
+@Composable
+private fun ProposalInboxButton(pendingCount: Int, onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        BadgedBox(
+            badge = {
+                if (pendingCount > 0) {
+                    Badge { Text(if (pendingCount > 99) "99+" else pendingCount.toString()) }
+                }
+            },
+        ) {
+            Icon(
+                Icons.AutoMirrored.Filled.Rule,
+                contentDescription = "Proposal 审批",
+                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
+            )
+        }
+    }
+}
+
+private const val MAX_THREAD_PROPOSAL_CARDS = 3
 
 @Composable
 private fun StatusBar(state: ConversationState) {
