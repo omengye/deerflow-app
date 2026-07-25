@@ -115,10 +115,7 @@ fun ChatScreen(
     val threadProposals = remember(proposalState.proposals, state.threadId) {
         proposalState.proposals
             .filter { it.trigger.threadId == state.threadId }
-            .sortedWith(
-                compareByDescending<SkillProposal> { it.status == "pending_review" }
-                    .thenByDescending { it.createdAt },
-            )
+            .sortedBy { it.createdAt }
             .take(MAX_THREAD_PROPOSAL_CARDS)
     }
 
@@ -331,6 +328,16 @@ fun ChatScreen(
     }
 }
 
+private sealed class TranscriptItem {
+    abstract val key: String
+    data class BlockItem(val block: com.deerflow.app.domain.DisplayBlock) : TranscriptItem() {
+        override val key: String get() = block.key
+    }
+    data class ProposalItem(val proposal: SkillProposal) : TranscriptItem() {
+        override val key: String get() = "proposal:${proposal.id}"
+    }
+}
+
 @Composable
 private fun Transcript(
     state: ConversationState,
@@ -343,14 +350,37 @@ private fun Transcript(
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
-    val itemCount = state.blocks.size + proposals.size
 
-    // Auto-scroll when new blocks are appended, but avoid restarting animations for every streamed content chunk.
-    LaunchedEffect(itemCount) {
-        if (itemCount > 0) listState.animateScrollToItem(itemCount - 1)
+    // Map each proposal ID to its anchor block index when first introduced in this thread session.
+    val proposalAnchors = remember(state.threadId) { mutableMapOf<String, Int>() }
+    val itemsList = remember(state.blocks, proposals, state.threadId) {
+        proposals.forEach { proposal ->
+            if (!proposalAnchors.containsKey(proposal.id)) {
+                proposalAnchors[proposal.id] = state.blocks.size
+            }
+        }
+
+        val proposalsByAnchor = proposals.groupBy { proposal ->
+            (proposalAnchors[proposal.id] ?: state.blocks.size).coerceIn(0, state.blocks.size)
+        }
+
+        val result = mutableListOf<TranscriptItem>()
+        for (i in 0..state.blocks.size) {
+            proposalsByAnchor[i]?.sortedBy { it.createdAt }?.forEach { proposal ->
+                result.add(TranscriptItem.ProposalItem(proposal))
+            }
+            if (i < state.blocks.size) {
+                result.add(TranscriptItem.BlockItem(state.blocks[i]))
+            }
+        }
+        result
     }
 
-    if (state.blocks.isEmpty() && proposals.isEmpty()) {
+    LaunchedEffect(itemsList.size) {
+        if (itemsList.isNotEmpty()) listState.animateScrollToItem(itemsList.size - 1)
+    }
+
+    if (itemsList.isEmpty()) {
         Column(
             modifier = modifier.fillMaxSize().padding(horizontal = 24.dp),
             verticalArrangement = Arrangement.Center,
@@ -388,18 +418,18 @@ private fun Transcript(
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
     ) {
-        items(state.blocks, key = { it.key }) { block ->
-            BlockCard(block, artifactHeaders = artifactHeaders)
-        }
-        items(proposals, key = { "proposal:${it.id}" }) { proposal ->
-            ProposalCard(
-                proposal = proposal,
-                busy = actionProposalId == proposal.id,
-                compact = true,
-                onView = { onViewProposal(proposal.id) },
-                onApprove = { onApproveProposal(proposal.id, null) },
-                onReject = { onRejectProposal(proposal.id, null) },
-            )
+        items(itemsList, key = { it.key }) { item ->
+            when (item) {
+                is TranscriptItem.BlockItem -> BlockCard(item.block, artifactHeaders = artifactHeaders)
+                is TranscriptItem.ProposalItem -> ProposalCard(
+                    proposal = item.proposal,
+                    busy = actionProposalId == item.proposal.id,
+                    compact = true,
+                    onView = { onViewProposal(item.proposal.id) },
+                    onApprove = { onApproveProposal(item.proposal.id, null) },
+                    onReject = { onRejectProposal(item.proposal.id, null) },
+                )
+            }
         }
     }
 }

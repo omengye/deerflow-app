@@ -89,6 +89,54 @@ fun ProposalCard(
                 )
             }
 
+            val isRejectedOrFailed = proposal.status in listOf("rejected", "failed", "stale")
+            val noteText = proposal.reviewNote?.ifBlank { null } ?: proposal.error?.ifBlank { null }
+            if (!pending && isRejectedOrFailed) {
+                val isAutoReject = noteText?.contains("auto", ignoreCase = true) == true
+                    || noteText?.contains("timeout", ignoreCase = true) == true
+                    || noteText?.contains("system", ignoreCase = true) == true
+                    || noteText?.contains("自动", ignoreCase = true) == true
+                    || (proposal.reviewedAt == null && proposal.reviewNote == null)
+                val title = if (isAutoReject) "🤖 系统自动拒绝" else "已拒绝"
+
+                Surface(
+                    color = scheme.errorContainer.copy(alpha = 0.4f),
+                    contentColor = scheme.onErrorContainer,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                        )
+                        if (!noteText.isNullOrBlank()) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = noteText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = scheme.onErrorContainer.copy(alpha = 0.85f),
+                            )
+                        }
+                    }
+                }
+            } else if (!pending && proposal.status == "published") {
+                Surface(
+                    color = scheme.primaryContainer.copy(alpha = 0.35f),
+                    contentColor = scheme.onPrimaryContainer,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                ) {
+                    Text(
+                        text = "✅ 已批准并发布生效",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
