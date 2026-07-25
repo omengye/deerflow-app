@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -103,7 +104,7 @@ fun ProposalCard(
                     color = scheme.errorContainer.copy(alpha = 0.4f),
                     contentColor = scheme.onErrorContainer,
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                 ) {
                     Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
                         Text(
@@ -126,7 +127,7 @@ fun ProposalCard(
                     color = scheme.primaryContainer.copy(alpha = 0.35f),
                     contentColor = scheme.onPrimaryContainer,
                     shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                 ) {
                     Text(
                         text = "✅ 已批准并发布生效",
