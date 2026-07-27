@@ -475,21 +475,36 @@ object ConversationReducer {
                 }
                 m.toolCalls?.forEach { call ->
                     val buf = ToolBuffer(id = call.id, name = call.function.name, args = call.function.arguments)
-                    st = st.upsert(
-                        toolKey(call.id),
-                        BlockKind.TOOL,
-                        header("TOOL_CALL", call.id),
-                        formatTool(buf),
-                        buf.details(),
-                    )
+                    st = st.copy(toolBuffers = st.toolBuffers + (call.id to buf))
+                        .upsert(
+                            toolKey(call.id),
+                            BlockKind.TOOL,
+                            header("TOOL_CALL", call.id),
+                            formatTool(buf),
+                            buf.details(),
+                        )
                 }
                 st
             }
-            Roles.TOOL -> appendSystem(
-                BlockKind.TOOL,
-                "TOOL #${shortId(m.toolCallId.orEmpty())}",
-                truncateToolDisplay(m.content.asMessageText(), MAX_TOOL_RESULT_DISPLAY_CHARS),
-            )
+            Roles.TOOL -> {
+                val rawId = m.toolCallId.orEmpty().trim()
+                if (rawId.isNotEmpty()) {
+                    val (s1, id) = resolveToolId(rawId)
+                    val content = m.content.asMessageText()
+                    val contentForState = truncateToolDisplay(content, MAX_TOOL_RESULT_DISPLAY_CHARS)
+                    val existingBuf = s1.toolBuffers[id] ?: ToolBuffer(id = id, name = m.name?.trim()?.takeIf { it.isNotEmpty() } ?: "tool")
+                    val buf = existingBuf.copy(result = contentForState, ended = true)
+                    s1.copy(toolBuffers = s1.toolBuffers + (id to buf))
+                        .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), formatTool(buf), buf.details())
+                        .recordToolResult(id, contentForState, isError = false)
+                } else {
+                    appendSystem(
+                        BlockKind.TOOL,
+                        "TOOL",
+                        truncateToolDisplay(m.content.asMessageText(), MAX_TOOL_RESULT_DISPLAY_CHARS),
+                    )
+                }
+            }
             Roles.REASONING -> appendSystem(BlockKind.REASONING, "Reasoning Output", m.content.asMessageText())
             else -> this
         }

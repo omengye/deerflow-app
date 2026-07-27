@@ -22,7 +22,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -68,6 +70,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -236,7 +239,7 @@ fun BlockCard(
                         // that cannot be split back apart, since arguments and results
                         // legitimately contain "|" (grep patterns, shell pipes, MD tables).
                         val toolName = block.tool?.name?.takeIf { it.isNotBlank() }
-                            ?: block.content.lineSequence().firstOrNull()?.trim().orEmpty()
+                            ?: block.content.substringBefore(" | ").lineSequence().firstOrNull()?.trim().orEmpty()
                         if (toolName.isNotEmpty()) "Tool Call: $toolName" else "Tool Call"
                     } else {
                         val toolId = block.header.substringAfter("#", "").trim()
@@ -263,7 +266,10 @@ fun BlockCard(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Row(
+                                modifier = Modifier.weight(1f, fill = false),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Icon(
                                     imageVector = Icons.Default.Build,
                                     contentDescription = "Tool Call",
@@ -275,9 +281,12 @@ fun BlockCard(
                                     text = title,
                                     style = MaterialTheme.typography.labelMedium,
                                     color = scheme.onSurfaceVariant,
-                                    fontWeight = FontWeight.Medium
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
+                            Spacer(Modifier.width(8.dp))
                             Icon(
                                 imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
                                 contentDescription = "Toggle",
@@ -324,26 +333,46 @@ fun BlockCard(
                                             color = scheme.primary.copy(alpha = 0.8f)
                                         )
                                         Spacer(Modifier.height(2.dp))
-                                        SelectionContainer {
-                                            Text(
-                                                text = result,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = scheme.onSurfaceVariant
-                                            )
+                                        val safeResult = remember(result) {
+                                            if (result.length > 8000) result.take(8000) + "\n\n[truncated for display]" else result
+                                        }
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(max = 240.dp)
+                                                .verticalScroll(rememberScrollState())
+                                        ) {
+                                            SelectionContainer {
+                                                Text(
+                                                    text = safeResult,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    color = scheme.onSurfaceVariant
+                                                )
+                                            }
                                         }
                                     }
                                 }
                             } else {
                                 // Tool result raw content (usually JSON)
-                                SelectionContainer {
-                                    Text(
-                                        text = block.content,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = scheme.onSurfaceVariant.copy(alpha = 0.85f),
-                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                                    )
+                                val safeContent = remember(block.content) {
+                                    if (block.content.length > 8000) block.content.take(8000) + "\n\n[truncated for display]" else block.content
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 240.dp)
+                                        .verticalScroll(rememberScrollState())
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
+                                    SelectionContainer {
+                                        Text(
+                                            text = safeContent,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = scheme.onSurfaceVariant.copy(alpha = 0.85f)
+                                        )
+                                    }
                                 }
                             }
                         }
