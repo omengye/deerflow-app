@@ -145,21 +145,39 @@ object ConversationReducer {
                 val name = e.raw.str("toolCallName").orEmpty()
                 val buf = ToolBuffer(id = id, name = name)
                 s1.copy(toolBuffers = s1.toolBuffers + (id to buf))
-                    .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), name.trim())
+                    .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), name.trim(), buf.details())
                     .recordToolCallStart(id, name)
             }
 
             "TOOL_CALL_ARGS", "TOOL_CALL_CHUNK" -> {
-                // Tool arguments can arrive as many large chunks, especially for image/file tools.
-                // Keep the UI responsive by not emitting state for every argument chunk.
-                s
+                // The backend sends the *complete* argument JSON in a single event just
+                // before TOOL_CALL_END -- it deliberately does not stream incremental
+                // deltas, because a partially built dict serializes to a closed object
+                // ("{}") that is not a valid prefix of the final JSON. So replace the
+                // buffered args rather than appending, or a retried/duplicated event
+                // would concatenate two whole JSON objects.
+                //
+                // The display block is deliberately not upserted here: TOOL_CALL_END and
+                // TOOL_CALL_RESULT both re-render right after this, so doing it now only
+                // costs an extra recomposition.
+                val args = e.textDelta()
+                if (args.isEmpty()) {
+                    s
+                } else {
+                    val (s1, id) = s.resolveToolId(e.toolCallId)
+                    val existing = s1.toolBuffers[id] ?: ToolBuffer(id = id)
+                    val name = e.toolCallName?.trim()?.takeIf { it.isNotEmpty() } ?: existing.name
+                    val buf = existing.copy(name = name, args = args)
+                    s1.copy(toolBuffers = s1.toolBuffers + (id to buf))
+                        .updateToolCallArgs(id, buf.name, buf.args)
+                }
             }
 
             "TOOL_CALL_END" -> {
                 val (s1, id) = s.resolveToolId(e.raw.str("toolCallId"))
                 val buf = (s1.toolBuffers[id] ?: ToolBuffer(id = id)).copy(ended = true)
                 s1.copy(toolBuffers = s1.toolBuffers + (id to buf))
-                    .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), formatTool(buf))
+                    .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), formatTool(buf), buf.details())
             }
 
             "TOOL_CALL_RESULT" -> {
@@ -174,7 +192,7 @@ object ConversationReducer {
                 val buf = (s1.toolBuffers[id] ?: ToolBuffer(id = id, name = "tool"))
                     .copy(result = contentForState, isError = isError)
                 s1.copy(toolBuffers = s1.toolBuffers + (id to buf))
-                    .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), formatTool(buf))
+                    .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), formatTool(buf), buf.details())
                     .recordToolResult(id, contentForState, isError)
             }
 
@@ -457,7 +475,13 @@ object ConversationReducer {
                 }
                 m.toolCalls?.forEach { call ->
                     val buf = ToolBuffer(id = call.id, name = call.function.name, args = call.function.arguments)
-                    st = st.upsert(toolKey(call.id), BlockKind.TOOL, header("TOOL_CALL", call.id), formatTool(buf))
+                    st = st.upsert(
+                        toolKey(call.id),
+                        BlockKind.TOOL,
+                        header("TOOL_CALL", call.id),
+                        formatTool(buf),
+                        buf.details(),
+                    )
                 }
                 st
             }
@@ -486,6 +510,25 @@ object ConversationReducer {
     }
 
     // -- formatting ----------------------------------------------------------
+
+    /**
+     * Structured counterpart of [formatTool], for renderers that need the
+     * individual fields. [formatTool]'s " | "-joined summary cannot be split
+     * back apart, because arguments and results legitimately contain "|".
+     *
+     * Applies the same display truncation as [formatTool] so the collapsed
+     * summary and the expanded view stay consistent.
+     */
+    private fun ToolBuffer.details(): ToolDetails = ToolDetails(
+        name = name.trim(),
+        args = args.trim().takeIf { it.isNotEmpty() }
+            ?.let { truncateToolDisplay(it, MAX_TOOL_ARGS_DISPLAY_CHARS) }
+            .orEmpty(),
+        result = result.trim().takeIf { it.isNotEmpty() }
+            ?.let { truncateToolDisplay(it, MAX_TOOL_RESULT_DISPLAY_CHARS) }
+            .orEmpty(),
+        isError = isError,
+    )
 
     private fun formatTool(buf: ToolBuffer): String {
         val parts = buildList {

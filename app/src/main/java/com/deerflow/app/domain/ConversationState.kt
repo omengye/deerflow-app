@@ -11,6 +11,25 @@ data class DisplayBlock(
     val header: String,
     val content: String,
     val artifacts: List<AgentArtifact> = emptyList(),
+    /**
+     * Structured tool-call fields, set for [BlockKind.TOOL] blocks that come
+     * from a tool call (as opposed to a bare tool result replayed from history).
+     *
+     * [content] stays a human-readable one-line summary for the collapsed row,
+     * but it joins these fields with " | " and therefore cannot be split back
+     * apart: arguments and results legitimately contain "|" -- a grep pattern
+     * like "foo|bar", a shell pipe, a Markdown table. Renderers must read these
+     * fields rather than parsing [content].
+     */
+    val tool: ToolDetails? = null,
+)
+
+/** Name/arguments/result of a tool call, kept structured for rendering. */
+data class ToolDetails(
+    val name: String,
+    val args: String = "",
+    val result: String = "",
+    val isError: Boolean = false,
 )
 
 enum class BlockKind { USER, ASSISTANT, REASONING, THINKING, TOOL, ARTIFACT, SYSTEM, INTERRUPT, ERROR }
@@ -59,8 +78,14 @@ data class ConversationState(
 
     // -- block helpers -------------------------------------------------------
 
-    fun upsert(key: String, kind: BlockKind, header: String, content: String): ConversationState {
-        val block = DisplayBlock(key, kind, header, content.trim())
+    fun upsert(
+        key: String,
+        kind: BlockKind,
+        header: String,
+        content: String,
+        tool: ToolDetails? = null,
+    ): ConversationState {
+        val block = DisplayBlock(key, kind, header, content.trim(), tool = tool)
         val idx = blocks.indexOfFirst { it.key == key }
         val newBlocks = if (idx >= 0) {
             blocks.toMutableList().also { it[idx] = block }

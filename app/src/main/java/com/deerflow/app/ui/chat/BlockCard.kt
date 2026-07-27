@@ -230,10 +230,14 @@ fun BlockCard(
                 var expanded by remember { mutableStateOf(false) }
                 val isToolCall = remember(block.header) { block.header.contains("TOOL_CALL") }
 
-                val title = remember(block.header, block.content) {
+                val title = remember(block.header, block.content, block.tool) {
                     if (isToolCall) {
-                        val toolName = block.content.substringBefore("|").trim()
-                        "Tool Call: $toolName"
+                        // Read the structured name; block.content is a " | "-joined summary
+                        // that cannot be split back apart, since arguments and results
+                        // legitimately contain "|" (grep patterns, shell pipes, MD tables).
+                        val toolName = block.tool?.name?.takeIf { it.isNotBlank() }
+                            ?: block.content.lineSequence().firstOrNull()?.trim().orEmpty()
+                        if (toolName.isNotEmpty()) "Tool Call: $toolName" else "Tool Call"
                     } else {
                         val toolId = block.header.substringAfter("#", "").trim()
                         if (toolId.isNotEmpty()) "Tool Result: #$toolId" else "Tool Result"
@@ -286,10 +290,12 @@ fun BlockCard(
                             HorizontalDivider(color = scheme.outline.copy(alpha = 0.15f))
 
                             if (isToolCall) {
-                                // Parse and layout name, args, result neatly
-                                val parts = remember(block.content) { block.content.split("|").map { it.trim() } }
-                                val args = remember(parts) { parts.getOrNull(1)?.removePrefix("args:")?.trim().orEmpty() }
-                                val result = remember(parts) { parts.getOrNull(2)?.removePrefix("result:")?.trim().orEmpty() }
+                                // Read the structured fields rather than splitting block.content
+                                // on "|": arguments and results legitimately contain that
+                                // character (grep patterns, shell pipes, Markdown tables), so
+                                // splitting truncated arguments and dropped results outright.
+                                val args = remember(block.tool) { block.tool?.args.orEmpty() }
+                                val result = remember(block.tool) { block.tool?.result.orEmpty() }
 
                                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                                     if (args.isNotEmpty()) {

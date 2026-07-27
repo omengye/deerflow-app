@@ -310,6 +310,9 @@ class ConversationRepository(
                 }
 
                 mutex.withLock {
+                    // Uploading released the lock; the thread may have been deleted while
+                    // it was in flight. Appending here would recreate its state entry.
+                    if (threadId in deletedThreadIds) return@withLock
                     val state = statesByThread[threadId] ?: ConversationState(threadId = threadId)
 
                     val displayText = UserDisplayText.clean(buildUserDisplayText(trimmed, uploadedFiles))
@@ -344,6 +347,9 @@ class ConversationRepository(
                 mutex.withLock {
                     updateRunningThreadIdsLocked()
                     updateForegroundServiceLocked()
+                    // Cancelling the previous run released the lock; skip a thread deleted
+                    // in the meantime rather than recreating its state (startRun guards too).
+                    if (threadId in deletedThreadIds) return@withLock
                     updateThreadStateLocked(threadId) { it.copy(interrupts = emptyList()).removeBlock("interrupts") }
                     startRun(threadId, entries)
                 }
@@ -362,7 +368,10 @@ class ConversationRepository(
             jobToJoin?.join()
             mutex.withLock {
                 updateRunningThreadIdsLocked()
-                updateThreadStateLocked(threadId) { it.copy(running = false, status = "Idle (cancelled)") }
+                // Deleted while the backend cancel was in flight: don't recreate its state.
+                if (threadId !in deletedThreadIds) {
+                    updateThreadStateLocked(threadId) { it.copy(running = false, status = "Idle (cancelled)") }
+                }
                 updateForegroundServiceLocked()
             }
         }
@@ -380,6 +389,13 @@ class ConversationRepository(
     }
 
     private fun startRun(threadId: String, resume: List<ResumeEntry>) {
+        // The caller captured threadId before awaiting (backend cancel, attachment
+        // upload), releasing the lock in between; the thread may have been deleted
+        // since. Starting a run here would resurrect its in-memory state, hold the
+        // foreground service open, and stream events into a thread the user removed.
+        // Runs on a *non-current* thread are fine and intentional -- only deletion
+        // is disqualifying.
+        if (threadId in deletedThreadIds) return
         val snapshot = statesByThread[threadId] ?: ConversationState(threadId = threadId)
         val now = System.currentTimeMillis()
         val session = RunSession(
