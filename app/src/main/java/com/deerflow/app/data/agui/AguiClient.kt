@@ -491,6 +491,14 @@ class AguiClient(
                     mimeType = raw.str("mimeType") ?: raw.str("mime_type") ?: fallback.mimeType,
                     kind = raw.str("kind") ?: fallback.kind,
                     size = raw.str("size")?.toLongOrNull() ?: fallback.size,
+                    anchorMessageId = raw.str("anchorMessageId")
+                        ?: raw.str("messageId")
+                        ?: raw.str("message_id")
+                        ?: fallback.anchorMessageId,
+                    anchorTurnIndex = raw.str("anchorTurnIndex")?.toIntOrNull()
+                        ?: raw.str("turnIndex")?.toIntOrNull()
+                        ?: raw.str("turn_index")?.toIntOrNull()
+                        ?: fallback.anchorTurnIndex,
                 )
             }
             else -> null

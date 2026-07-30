@@ -489,14 +489,13 @@ private fun ArtifactCard(artifact: AgentArtifact, headers: Map<String, String>) 
         scope.launch {
             downloading = true
             downloadProgress = null
-            val authHeaders = if (isImage) emptyMap() else headers
             val result = runCatching {
                 saveToDownloads(
                     context = context,
                     displayName = artifact.name,
                     mime = artifact.mimeType,
                     url = artifact.url,
-                    authHeaders = authHeaders,
+                    authHeaders = headers,
                     onProgress = { v -> downloadProgress = v },
                 )
             }
@@ -984,7 +983,7 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
                     displayName = block.alt.ifBlank { "image" },
                     mime = "image/*",
                     url = renderableUrl,
-                    authHeaders = emptyMap(),
+                    authHeaders = headers,
                     onProgress = { v -> downloadProgress = v },
                 )
             }

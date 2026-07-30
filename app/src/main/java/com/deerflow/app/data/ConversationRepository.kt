@@ -318,8 +318,15 @@ class ConversationRepository(
                     val displayText = UserDisplayText.clean(buildUserDisplayText(trimmed, uploadedFiles))
                     val promptText = buildAgentPromptText(trimmed, uploadedFiles)
                     val nextState = state.let { s ->
-                        s.appendSystem(BlockKind.USER, "You", displayText)
-                            .copy(history = s.history + userMessage(promptText))
+                        val userId = "user-${UUID.randomUUID().toString().replace("-", "")}"
+                        val withHistory = s.copy(history = s.history + userMessage(promptText, id = userId))
+                        withHistory.appendSystem(
+                            BlockKind.USER,
+                            "You",
+                            displayText,
+                            messageId = userId,
+                            turnIndex = withHistory.turnCount,
+                        )
                     }
                     updateThreadStateLocked(threadId) { nextState }
                     ensureProvisionalThreadMetaLocked(threadId)
@@ -568,6 +575,8 @@ class ConversationRepository(
             } finally {
                 stopReconnectCountdown()
                 var shouldFetch = false
+                var artifactMessageId: String? = null
+                var artifactTurnIndex: Int? = null
                 mutex.withLock {
                     if (runJobsByThread[threadId] == myJob) {
                         runJobsByThread.remove(threadId)
@@ -580,11 +589,21 @@ class ConversationRepository(
                             shouldFetch = true
                             ensureProvisionalThreadMetaLocked(threadId)
                         }
+                        statesByThread[threadId]?.let { state ->
+                            artifactMessageId = state.currentTurnAssistantMessageId()
+                            artifactTurnIndex = state.turnCount.takeIf { it > 0 }
+                        }
                     }
                     updateForegroundServiceLocked()
                 }
                 scope.launch {
-                    syncThreadInfoAfterRun(threadId, client, waitForTitle = shouldFetch)
+                    syncThreadInfoAfterRun(
+                        threadId,
+                        client,
+                        waitForTitle = shouldFetch,
+                        artifactMessageId = artifactMessageId,
+                        artifactTurnIndex = artifactTurnIndex,
+                    )
                 }
             }
         }
@@ -598,14 +617,27 @@ class ConversationRepository(
         threadId: String,
         client: AguiClient,
         waitForTitle: Boolean,
+        artifactMessageId: String?,
+        artifactTurnIndex: Int?,
     ) {
         if (!waitForTitle) {
-            syncThreadInfo(threadId, client)
+            syncThreadInfo(
+                threadId,
+                client,
+                fallbackArtifactMessageId = artifactMessageId,
+                fallbackArtifactTurnIndex = artifactTurnIndex,
+            )
             return
         }
 
         for (attempt in 0 until TITLE_SYNC_ATTEMPTS) {
-            val hasTitle = syncThreadInfo(threadId, client, ensureProvisionalTitle = attempt == 0)
+            val hasTitle = syncThreadInfo(
+                threadId,
+                client,
+                ensureProvisionalTitle = attempt == 0,
+                fallbackArtifactMessageId = artifactMessageId,
+                fallbackArtifactTurnIndex = artifactTurnIndex,
+            )
             if (hasTitle) return
             if (attempt < TITLE_SYNC_ATTEMPTS - 1) {
                 kotlinx.coroutines.delay(TITLE_SYNC_RETRY_DELAY_MS * (attempt + 1))
@@ -617,6 +649,8 @@ class ConversationRepository(
         threadId: String,
         client: AguiClient,
         ensureProvisionalTitle: Boolean = false,
+        fallbackArtifactMessageId: String? = null,
+        fallbackArtifactTurnIndex: Int? = null,
     ): Boolean {
         val info = client.fetchThreadInfo(threadId)
         if (info == null) {
@@ -644,7 +678,20 @@ class ConversationRepository(
                 statesByThread[threadId]?.let(::saveCurrentThread)
             }
             if (info.artifacts.isNotEmpty()) {
-                updateThreadStateLocked(threadId) { it.appendArtifacts(info.artifacts) }
+                updateThreadStateLocked(threadId) { state ->
+                    val existingPaths = state.artifacts.mapTo(mutableSetOf()) { it.path }
+                    val placedArtifacts = info.artifacts.map { artifact ->
+                        if (artifact.path in existingPaths) {
+                            artifact
+                        } else {
+                            artifact.copy(
+                                anchorMessageId = artifact.anchorMessageId ?: fallbackArtifactMessageId,
+                                anchorTurnIndex = artifact.anchorTurnIndex ?: fallbackArtifactTurnIndex,
+                            )
+                        }
+                    }
+                    state.appendArtifacts(placedArtifacts)
+                }
                 statesByThread[threadId]?.let(::saveCurrentThread)
             }
             updateThreadStateLocked(threadId) { current ->

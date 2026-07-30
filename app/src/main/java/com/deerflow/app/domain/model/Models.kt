@@ -93,6 +93,10 @@ data class AgentArtifact(
     val mimeType: String? = null,
     val kind: String = "file",
     val size: Long? = null,
+    /** Assistant message after which this artifact should be rendered. */
+    val anchorMessageId: String? = null,
+    /** 1-based user turn used when no stable assistant message id is available. */
+    val anchorTurnIndex: Int? = null,
 )
 
 // ---------------------------------------------------------------------------
@@ -100,8 +104,8 @@ data class AgentArtifact(
 // ---------------------------------------------------------------------------
 
 /** Build a string content message (the common user-input case). */
-fun userMessage(text: String): ChatMessage =
-    ChatMessage(role = Roles.USER, content = JsonPrimitive(text))
+fun userMessage(text: String, id: String? = null): ChatMessage =
+    ChatMessage(role = Roles.USER, content = JsonPrimitive(text), id = id)
 
 /**
  * Flatten message content into display text. Content may be a plain string or

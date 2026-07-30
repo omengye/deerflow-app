@@ -54,7 +54,7 @@ object ConversationReducer {
                 if (s1.shouldIgnoreTextStart(id)) s1.copy(replay = s1.replay.ignore(id))
                 else s1.recordAgentName(id, e)
                     .ensureText(id)
-                    .upsert(textKey(id), BlockKind.ASSISTANT, s1.textHeader(id), "")
+                    .upsert(textKey(id), BlockKind.ASSISTANT, s1.textHeader(id), "", messageId = id)
             }
 
             "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK" -> {
@@ -68,7 +68,13 @@ object ConversationReducer {
                 s2.copy(textBuffers = s2.textBuffers + (id to buf))
                     .let { state ->
                         if (visible.isEmpty()) state.removeBlock(textKey(id))
-                        else state.upsert(textKey(id), BlockKind.ASSISTANT, s2.textHeader(id), visible)
+                        else state.upsert(
+                            textKey(id),
+                            BlockKind.ASSISTANT,
+                            s2.textHeader(id),
+                            visible,
+                            messageId = id,
+                        )
                     }
             }
 
@@ -87,7 +93,13 @@ object ConversationReducer {
                     s2.copy(textBuffers = s2.textBuffers - id, textAgentNames = s2.textAgentNames - id)
                         .removeBlock(textKey(id)).clearActiveText(id)
                 } else {
-                    s2.upsert(textKey(id), BlockKind.ASSISTANT, s2.textHeader(id), filtered)
+                    s2.upsert(
+                        textKey(id),
+                        BlockKind.ASSISTANT,
+                        s2.textHeader(id),
+                        filtered,
+                        messageId = id,
+                    )
                         .copy(
                             history = s2.history + ChatMessage(
                                 role = Roles.ASSISTANT,
@@ -201,7 +213,17 @@ object ConversationReducer {
 
             "CUSTOM" -> {
                 if (e.raw.str("name") == "deerflow.artifacts") {
-                    s.appendArtifacts(parseArtifacts(e.raw))
+                    val anchorMessageId = artifactEventMessageId(e.raw)
+                        ?: s.activeTextId?.trim()?.takeIf { it.isNotEmpty() }
+                        ?: s.currentTurnAssistantMessageId()
+                    val anchorTurnIndex = s.turnCount.takeIf { it > 0 }
+                    val placed = parseArtifacts(e.raw).map { artifact ->
+                        artifact.copy(
+                            anchorMessageId = artifact.anchorMessageId ?: anchorMessageId,
+                            anchorTurnIndex = artifact.anchorTurnIndex ?: anchorTurnIndex,
+                        )
+                    }
+                    s.appendArtifacts(placed)
                 } else {
                     s
                 }
@@ -238,7 +260,13 @@ object ConversationReducer {
             state = if (text.isEmpty()) {
                 state.removeBlock(textKey(id))
             } else {
-                state.upsert(textKey(id), BlockKind.ASSISTANT, state.textHeader(id), text).copy(
+                state.upsert(
+                    textKey(id),
+                    BlockKind.ASSISTANT,
+                    state.textHeader(id),
+                    text,
+                    messageId = id,
+                ).copy(
                     history = state.history + ChatMessage(
                         role = Roles.ASSISTANT,
                         content = kotlinx.serialization.json.JsonPrimitive(text),
@@ -385,6 +413,7 @@ object ConversationReducer {
         var state = copy(blocks = emptyList(), systemCounter = 0)
         val parsed = mutableListOf<ChatMessage>()
         val assistantTextsInTurn = mutableSetOf<String>()
+        var turnIndex = 0
         for (raw in arr) {
             val obj = raw as? JsonObject ?: continue
             val role = Roles.normalize(obj.str("role"))
@@ -403,11 +432,14 @@ object ConversationReducer {
                 toolCallId = obj.str("toolCallId") ?: obj.str("tool_call_id"),
                 error = obj.str("error"),
             )
-            if (role == Roles.USER) assistantTextsInTurn.clear()
+            if (role == Roles.USER) {
+                assistantTextsInTurn.clear()
+                turnIndex += 1
+            }
             if (shouldSkipSnapshotMessage(assistantTextsInTurn, msg)) continue
             msg.assistantTextKey()?.let { assistantTextsInTurn.add(it) }
             parsed.add(msg)
-            state = state.renderHistoryMessage(msg)
+            state = state.renderHistoryMessage(msg, turnIndex.takeIf { it > 0 })
         }
         val mergedBlocks = mergeSnapshotBlocks(
             oldBlocks = blocks,
@@ -416,12 +448,12 @@ object ConversationReducer {
         return state.copy(
             blocks = mergedBlocks,
             history = parsed,
-        )
+        ).rebuildArtifactBlocks()
     }
 
     private fun DisplayBlock.isSnapshotIndependentBlock(): Boolean =
         !key.startsWith("sys:") && when (kind) {
-            BlockKind.REASONING, BlockKind.THINKING, BlockKind.ARTIFACT -> true
+            BlockKind.REASONING, BlockKind.THINKING -> true
             else -> false
         }
 
@@ -463,15 +495,36 @@ object ConversationReducer {
         return ReplayState.normalize(content.asMessageText()).takeIf { it.isNotEmpty() }
     }
 
-    private fun ConversationState.renderHistoryMessage(m: ChatMessage): ConversationState =
+    private fun ConversationState.renderHistoryMessage(
+        m: ChatMessage,
+        turnIndex: Int?,
+    ): ConversationState =
         when (Roles.normalize(m.role)) {
-            Roles.USER -> appendSystem(BlockKind.USER, "You", UserDisplayText.clean(m.content.asMessageText()))
+            Roles.USER -> appendSystem(
+                BlockKind.USER,
+                "You",
+                UserDisplayText.clean(m.content.asMessageText()),
+                messageId = m.id,
+                turnIndex = turnIndex,
+            )
             Roles.ASSISTANT -> {
                 var st = this
                 val text = m.content.asMessageText()
                 if (text.isNotEmpty()) {
                     val spk = m.name?.let { "Assistant ($it)" } ?: "Assistant"
-                    st = st.appendSystem(BlockKind.ASSISTANT, spk, text)
+                    val messageId = m.id?.trim()?.takeIf { it.isNotEmpty() }
+                    st = if (messageId != null) {
+                        st.upsert(
+                            textKey(messageId),
+                            BlockKind.ASSISTANT,
+                            spk,
+                            text,
+                            messageId = messageId,
+                            turnIndex = turnIndex,
+                        )
+                    } else {
+                        st.appendSystem(BlockKind.ASSISTANT, spk, text, turnIndex = turnIndex)
+                    }
                 }
                 m.toolCalls?.forEach { call ->
                     val buf = ToolBuffer(id = call.id, name = call.function.name, args = call.function.arguments)
@@ -482,6 +535,7 @@ object ConversationReducer {
                             header("TOOL_CALL", call.id),
                             formatTool(buf),
                             buf.details(),
+                            turnIndex = turnIndex,
                         )
                 }
                 st
@@ -495,17 +549,31 @@ object ConversationReducer {
                     val existingBuf = s1.toolBuffers[id] ?: ToolBuffer(id = id, name = m.name?.trim()?.takeIf { it.isNotEmpty() } ?: "tool")
                     val buf = existingBuf.copy(result = contentForState, ended = true)
                     s1.copy(toolBuffers = s1.toolBuffers + (id to buf))
-                        .upsert(toolKey(id), BlockKind.TOOL, header("TOOL_CALL", id), formatTool(buf), buf.details())
+                        .upsert(
+                            toolKey(id),
+                            BlockKind.TOOL,
+                            header("TOOL_CALL", id),
+                            formatTool(buf),
+                            buf.details(),
+                            turnIndex = turnIndex,
+                        )
                         .recordToolResult(id, contentForState, isError = false)
                 } else {
                     appendSystem(
                         BlockKind.TOOL,
                         "TOOL",
                         truncateToolDisplay(m.content.asMessageText(), MAX_TOOL_RESULT_DISPLAY_CHARS),
+                        turnIndex = turnIndex,
                     )
                 }
             }
-            Roles.REASONING -> appendSystem(BlockKind.REASONING, "Reasoning Output", m.content.asMessageText())
+            Roles.REASONING -> appendSystem(
+                BlockKind.REASONING,
+                "Reasoning Output",
+                m.content.asMessageText(),
+                messageId = m.id,
+                turnIndex = turnIndex,
+            )
             else -> this
         }
 
@@ -587,6 +655,12 @@ object ConversationReducer {
             val kind = obj.str("kind")?.lowercase()?.takeIf { it == "image" || it == "file" }
                 ?: if (mimeType?.startsWith("image/") == true) "image" else "file"
             val size = obj.str("size")?.toLongOrNull()
+            val anchorMessageId = obj.str("anchorMessageId")
+                ?: obj.str("messageId")
+                ?: obj.str("message_id")
+            val anchorTurnIndex = obj.str("anchorTurnIndex")?.toIntOrNull()
+                ?: obj.str("turnIndex")?.toIntOrNull()
+                ?: obj.str("turn_index")?.toIntOrNull()
             AgentArtifact(
                 path = path,
                 name = name,
@@ -594,8 +668,18 @@ object ConversationReducer {
                 mimeType = mimeType,
                 kind = kind,
                 size = size,
+                anchorMessageId = anchorMessageId,
+                anchorTurnIndex = anchorTurnIndex,
             )
         }
+    }
+
+    private fun artifactEventMessageId(raw: JsonObject): String? {
+        val value = raw["value"] as? JsonObject
+        return raw.str("messageId")
+            ?: raw.str("message_id")
+            ?: value?.str("messageId")
+            ?: value?.str("message_id")
     }
 
     private fun summarizeToolResult(raw: JsonObject): String {
