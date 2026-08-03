@@ -46,6 +46,11 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 
+private data class ThreadSyncResult(
+    val fetched: Boolean = false,
+    val hasServerTitle: Boolean = false,
+)
+
 /**
  * App-scoped conversation store. Each thread owns an independent state and run
  * job, while [state] exposes only the currently selected thread to the UI.
@@ -439,6 +444,7 @@ class ConversationRepository(
             val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
             var retryAttempt = 0
             var reconnecting = recovering
+            var replayExpired = false
             var reconnectDeadlineElapsedMillis = if (recovering) {
                 SystemClock.elapsedRealtime() + STREAM_RECONNECT_WINDOW_MS
             } else 0L
@@ -559,12 +565,15 @@ class ConversationRepository(
                 }
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                replayExpired = e is AguiHttpException && e.statusCode == 410
                 mutex.withLock {
                     if (runJobsByThread[threadId] == myJob) {
                         updateThreadStateLocked(threadId) { state ->
-                            if (e is AguiHttpException && e.statusCode == 410) {
-                                state.copy(running = false, status = "Replay expired; refresh the thread to load the final result")
-                                    .appendSystem(BlockKind.ERROR, "[REPLAY_EXPIRED]", "The saved stream can no longer be replayed.")
+                            if (replayExpired) {
+                                // A 410 only means that the transient SSE replay buffer is
+                                // gone. The run result is persisted with the thread and is
+                                // recovered from the thread snapshot below.
+                                state.copy(running = false, status = REPLAY_RECOVERY_STATUS)
                             } else {
                                 state.copy(running = false, status = "Stream error: ${e.message}")
                                     .appendSystem(BlockKind.ERROR, "[RUN_ERROR]", e.message.orEmpty())
@@ -603,6 +612,7 @@ class ConversationRepository(
                         waitForTitle = shouldFetch,
                         artifactMessageId = artifactMessageId,
                         artifactTurnIndex = artifactTurnIndex,
+                        recoverExpiredReplay = replayExpired,
                     )
                 }
             }
@@ -619,28 +629,53 @@ class ConversationRepository(
         waitForTitle: Boolean,
         artifactMessageId: String?,
         artifactTurnIndex: Int?,
+        recoverExpiredReplay: Boolean,
     ) {
-        if (!waitForTitle) {
-            syncThreadInfo(
+        val maxAttempts = if (waitForTitle || recoverExpiredReplay) POST_RUN_SYNC_ATTEMPTS else 1
+        var replaySnapshotFetched = !recoverExpiredReplay
+
+        for (attempt in 0 until maxAttempts) {
+            if (recoverExpiredReplay) {
+                val shouldStop = mutex.withLock {
+                    threadId in deletedThreadIds || threadId in runJobsByThread
+                }
+                if (shouldStop) return
+            }
+
+            val result = syncThreadInfo(
                 threadId,
                 client,
+                ensureProvisionalTitle = waitForTitle && attempt == 0,
                 fallbackArtifactMessageId = artifactMessageId,
                 fallbackArtifactTurnIndex = artifactTurnIndex,
+                skipIfRunning = recoverExpiredReplay,
             )
-            return
+            if (result.fetched) replaySnapshotFetched = true
+
+            val titleReady = !waitForTitle || result.hasServerTitle
+            if (titleReady && replaySnapshotFetched) return
+
+            if (attempt < maxAttempts - 1) {
+                kotlinx.coroutines.delay(POST_RUN_SYNC_RETRY_DELAY_MS * (attempt + 1))
+            }
         }
 
-        for (attempt in 0 until TITLE_SYNC_ATTEMPTS) {
-            val hasTitle = syncThreadInfo(
-                threadId,
-                client,
-                ensureProvisionalTitle = attempt == 0,
-                fallbackArtifactMessageId = artifactMessageId,
-                fallbackArtifactTurnIndex = artifactTurnIndex,
-            )
-            if (hasTitle) return
-            if (attempt < TITLE_SYNC_ATTEMPTS - 1) {
-                kotlinx.coroutines.delay(TITLE_SYNC_RETRY_DELAY_MS * (attempt + 1))
+        if (recoverExpiredReplay && !replaySnapshotFetched) {
+            mutex.withLock {
+                if (threadId !in deletedThreadIds && threadId !in runJobsByThread) {
+                    updateThreadStateLocked(threadId) { state ->
+                        if (state.status == REPLAY_RECOVERY_STATUS) {
+                            state.copy(status = REPLAY_RECOVERY_FAILED_STATUS)
+                                .appendSystem(
+                                    BlockKind.ERROR,
+                                    "[SYNC_ERROR]",
+                                    "The live stream replay expired and the latest thread snapshot could not be loaded.",
+                                )
+                        } else {
+                            state
+                        }
+                    }
+                }
             }
         }
     }
@@ -651,7 +686,8 @@ class ConversationRepository(
         ensureProvisionalTitle: Boolean = false,
         fallbackArtifactMessageId: String? = null,
         fallbackArtifactTurnIndex: Int? = null,
-    ): Boolean {
+        skipIfRunning: Boolean = false,
+    ): ThreadSyncResult {
         val info = client.fetchThreadInfo(threadId)
         if (info == null) {
             if (ensureProvisionalTitle) {
@@ -661,12 +697,14 @@ class ConversationRepository(
                     }
                 }
             }
-            return false
+            return ThreadSyncResult()
         }
 
+        var applied = false
         var hasServerTitle = false
         mutex.withLock {
-            if (threadId in deletedThreadIds) return@withLock
+            if (threadId in deletedThreadIds || (skipIfRunning && threadId in runJobsByThread)) return@withLock
+            applied = true
             if (info.messages.isNotEmpty()) {
                 val snapshotEvent = AguiEvent(
                     type = "MESSAGES_SNAPSHOT",
@@ -695,7 +733,9 @@ class ConversationRepository(
                 statesByThread[threadId]?.let(::saveCurrentThread)
             }
             updateThreadStateLocked(threadId) { current ->
-                if (!current.running && current.status.startsWith("Replay expired")) {
+                if (!current.running &&
+                    (current.status == REPLAY_RECOVERY_STATUS || current.status == REPLAY_RECOVERY_FAILED_STATUS)
+                ) {
                     current.copy(status = "Idle")
                 } else {
                     current
@@ -724,7 +764,10 @@ class ConversationRepository(
                 ensureProvisionalThreadMetaLocked(threadId)
             }
         }
-        return hasServerTitle
+        return ThreadSyncResult(
+            fetched = applied,
+            hasServerTitle = applied && hasServerTitle,
+        )
     }
 
     private fun ensureProvisionalThreadMetaLocked(threadId: String, nowMillis: Long = System.currentTimeMillis()) {
@@ -894,8 +937,10 @@ class ConversationRepository(
         private const val INITIAL_RECONNECT_DELAY_MS = 1000L
         private const val MAX_RECONNECT_DELAY_MS = 30_000L
         private const val RECONNECT_COUNTDOWN_TICK_MS = 1000L
-        private const val TITLE_SYNC_ATTEMPTS = 4
-        private const val TITLE_SYNC_RETRY_DELAY_MS = 1000L
+        private const val POST_RUN_SYNC_ATTEMPTS = 4
+        private const val POST_RUN_SYNC_RETRY_DELAY_MS = 1000L
+        private const val REPLAY_RECOVERY_STATUS = "Restoring final result..."
+        private const val REPLAY_RECOVERY_FAILED_STATUS = "Thread refresh failed; reopen the thread to retry"
         private val THREAD_TITLE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
         private const val LOG_TAG = "DeerFlowStream"
         private fun newThreadId(): String = "thread-${UUID.randomUUID().toString().replace("-", "")}"
