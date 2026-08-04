@@ -59,7 +59,7 @@ Tap the **gear icon** → set:
 | Field | Maps to TUI env var | Notes |
 |---|---|---|
 | Endpoint URL | `AG_UI_ENDPOINT` | Emulator → host machine uses `http://10.0.2.2:<port>/agent` |
-| Headers (JSON) | `AG_UI_HEADERS` | e.g. `{"Authorization":"Bearer …"}` |
+| Token | `AG_UI_HEADERS` | Bare token; sent as `Authorization: Bearer <token>` |
 | Initial state (JSON) | `AG_UI_INITIAL_STATE` | passed as the run's `state` |
 
 Settings persist via DataStore and apply to the next run.

@@ -19,17 +19,19 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 /** User-configurable connection settings. Port of internal/config/config.go. */
 data class AppSettings(
     val endpoint: String = DEFAULT_ENDPOINT,
-    val headersJson: String = "",
+    val token: String = "",
     val initialStateJson: String = "",
 ) {
-    /** Parse [headersJson] into a header map, ignoring malformed input. */
+    /**
+     * Build the Authorization header map from [token].
+     *
+     * If [token] is blank, returns an empty map (no auth header sent). Otherwise
+     * the token is sent as `Authorization: Bearer <token>`.
+     */
     fun headers(): Map<String, String> {
-        if (headersJson.isBlank()) return emptyMap()
-        return runCatching {
-            AguiJson.parseToJsonElement(headersJson).jsonObject.mapNotNull { (k, v) ->
-                (v as? JsonPrimitive)?.let { k to it.content }
-            }.toMap()
-        }.getOrDefault(emptyMap())
+        val trimmed = token.trim()
+        return if (trimmed.isEmpty()) emptyMap()
+        else mapOf("Authorization" to "Bearer $trimmed")
     }
 
     /** Parse [initialStateJson] into a JSON object, ignoring malformed input. */
@@ -46,13 +48,15 @@ data class AppSettings(
 
 class SettingsStore(private val context: Context) {
     private val endpointKey = stringPreferencesKey("endpoint")
-    private val headersKey = stringPreferencesKey("headers")
+    private val tokenKey = stringPreferencesKey("token")
+    private val legacyHeadersKey = stringPreferencesKey("headers")
     private val initialStateKey = stringPreferencesKey("initial_state")
 
     val flow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
         AppSettings(
             endpoint = prefs[endpointKey]?.takeIf { it.isNotBlank() } ?: AppSettings.DEFAULT_ENDPOINT,
-            headersJson = prefs[headersKey].orEmpty(),
+            token = prefs[tokenKey]?.takeIf { it.isNotBlank() }
+                ?: prefs[legacyHeadersKey]?.let { extractTokenFromLegacyHeaders(it) }.orEmpty(),
             initialStateJson = prefs[initialStateKey].orEmpty(),
         )
     }
@@ -62,8 +66,28 @@ class SettingsStore(private val context: Context) {
     suspend fun save(settings: AppSettings) {
         context.dataStore.edit { prefs ->
             prefs[endpointKey] = settings.endpoint.trim()
-            prefs[headersKey] = settings.headersJson.trim()
+            prefs[tokenKey] = settings.token.trim()
             prefs[initialStateKey] = settings.initialStateJson.trim()
+            prefs.remove(legacyHeadersKey)
         }
+    }
+
+    /**
+     * Extract a bare token from a legacy headers JSON string.
+     *
+     * Handles both `{"Authorization":"Bearer xxx"}` and `{"Authorization":"xxx"}`;
+     * returns null when there is no Authorization entry or the JSON is malformed.
+     */
+    private fun extractTokenFromLegacyHeaders(json: String): String? {
+        if (json.isBlank()) return null
+        return runCatching {
+            val auth = (AguiJson.parseToJsonElement(json).jsonObject["Authorization"]
+                as? JsonPrimitive)?.content ?: return null
+            when {
+                auth.startsWith("Bearer ", ignoreCase = true) -> auth.substring(7).trim()
+                auth.isNotBlank() -> auth.trim()
+                else -> null
+            }
+        }.getOrNull()
     }
 }

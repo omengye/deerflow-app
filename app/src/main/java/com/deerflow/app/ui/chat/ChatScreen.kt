@@ -420,7 +420,16 @@ private fun Transcript(
     ) {
         items(itemsList, key = { it.key }) { item ->
             when (item) {
-                is TranscriptItem.BlockItem -> BlockCard(item.block, artifactHeaders = artifactHeaders)
+                is TranscriptItem.BlockItem -> {
+                    val isLastBlock = state.blocks.lastOrNull()?.key == item.block.key
+                    val streamingKind = item.block.kind in STREAMING_KINDS
+                    val isStreaming = state.running && isLastBlock && streamingKind
+                    BlockCard(
+                        block = item.block,
+                        artifactHeaders = artifactHeaders,
+                        isStreaming = isStreaming,
+                    )
+                }
                 is TranscriptItem.ProposalItem -> ProposalCard(
                     proposal = item.proposal,
                     busy = actionProposalId == item.proposal.id,
@@ -454,6 +463,13 @@ private fun ProposalInboxButton(pendingCount: Int, onClick: () -> Unit) {
 }
 
 private const val MAX_THREAD_PROPOSAL_CARDS = 3
+
+private val STREAMING_KINDS = setOf(
+    com.deerflow.app.domain.BlockKind.ASSISTANT,
+    com.deerflow.app.domain.BlockKind.TOOL,
+    com.deerflow.app.domain.BlockKind.THINKING,
+    com.deerflow.app.domain.BlockKind.REASONING,
+)
 
 @Composable
 private fun StatusBar(state: ConversationState) {

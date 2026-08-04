@@ -16,9 +16,9 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     val settings: StateFlow<AppSettings> =
         store.flow.stateIn(viewModelScope, SharingStarted.Eagerly, AppSettings())
 
-    fun save(endpoint: String, headersJson: String, initialStateJson: String) {
+    fun save(endpoint: String, token: String, initialStateJson: String) {
         viewModelScope.launch {
-            store.save(AppSettings(endpoint, headersJson, initialStateJson))
+            store.save(AppSettings(endpoint, token, initialStateJson))
         }
     }
 }

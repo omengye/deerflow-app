@@ -10,6 +10,15 @@ import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,6 +44,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -54,10 +64,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -99,6 +110,7 @@ fun BlockCard(
     block: DisplayBlock,
     modifier: Modifier = Modifier,
     artifactHeaders: Map<String, String> = emptyMap(),
+    isStreaming: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
 
@@ -159,6 +171,12 @@ fun BlockCard(
                                 textColor = scheme.onSecondary,
                                 artifactHeaders = artifactHeaders,
                             )
+                            if (isStreaming && block.content.isNotEmpty()) {
+                                TypingCursor(
+                                    color = scheme.onSecondary,
+                                    modifier = Modifier.padding(top = 2.dp),
+                                )
+                            }
                         }
                     }
                 }
@@ -170,15 +188,21 @@ fun BlockCard(
                 val isThinking = block.kind == BlockKind.THINKING
                 val title = if (isThinking) "Thinking Process" else "Reasoning Output"
                 val icon = if (isThinking) Icons.Default.Info else Icons.Default.Build
+                val accentColor = scheme.tertiary
+                val baseContainerColor = scheme.secondaryContainer.copy(alpha = 0.3f)
+                val streamingContainerColor = accentColor.copy(alpha = 0.18f)
+                val containerColor by animateColorAsState(
+                    targetValue = if (isStreaming) streamingContainerColor else baseContainerColor,
+                    animationSpec = tween(durationMillis = 400, easing = FastOutSlowInEasing),
+                    label = "thinkingBg",
+                )
 
                 Card(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .fillMaxWidth()
                         .animateContentSize(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = scheme.secondaryContainer.copy(alpha = 0.3f)
-                    ),
+                    colors = CardDefaults.cardColors(containerColor = containerColor),
                     border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.2f))
                 ) {
                     Column {
@@ -191,11 +215,11 @@ fun BlockCard(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(
-                                    imageVector = icon,
+                                StreamingIcon(
+                                    isStreaming = isStreaming,
+                                    staticIcon = icon,
+                                    tint = accentColor,
                                     contentDescription = title,
-                                    tint = scheme.tertiary,
-                                    modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Text(
@@ -247,14 +271,21 @@ fun BlockCard(
                     }
                 }
 
+                val accentColor = scheme.primary
+                val baseContainerColor = scheme.surfaceVariant.copy(alpha = 0.4f)
+                val streamingContainerColor = accentColor.copy(alpha = 0.18f)
+                val containerColor by animateColorAsState(
+                    targetValue = if (isStreaming) streamingContainerColor else baseContainerColor,
+                    animationSpec = tween(durationMillis = 400, easing = FastOutSlowInEasing),
+                    label = "toolBg",
+                )
+
                 Card(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .fillMaxWidth()
                         .animateContentSize(),
-                    colors = CardDefaults.cardColors(
-                        containerColor = scheme.surfaceVariant.copy(alpha = 0.4f)
-                    ),
+                    colors = CardDefaults.cardColors(containerColor = containerColor),
                     border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.2f))
                 ) {
                     Column {
@@ -270,11 +301,11 @@ fun BlockCard(
                                 modifier = Modifier.weight(1f, fill = false),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Build,
+                                StreamingIcon(
+                                    isStreaming = isStreaming,
+                                    staticIcon = Icons.Default.Build,
+                                    tint = accentColor,
                                     contentDescription = "Tool Call",
-                                    tint = scheme.primary,
-                                    modifier = Modifier.size(16.dp)
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Text(
@@ -1377,4 +1408,100 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
 
 private fun isRenderableMarkdownUrl(url: String): Boolean {
     return url.startsWith("http://") || url.startsWith("https://")
+}
+
+// ---------------------------------------------------------------------------
+// Streaming animation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Small spinning indicator shown in tool/thinking/reasoning headers while the
+ * block is still being streamed. Replaces the static icon during accumulation.
+ */
+@Composable
+private fun StreamingIndicator(
+    tint: Color,
+    modifier: Modifier = Modifier,
+) {
+    val transition = rememberInfiniteTransition(label = "streaming")
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 900, easing = LinearEasing),
+        ),
+        label = "spin",
+    )
+    CircularProgressIndicator(
+        progress = { (angle / 360f).coerceIn(0f, 1f) },
+        modifier = modifier.size(16.dp),
+        strokeWidth = 2.dp,
+        color = tint,
+    )
+}
+
+/**
+ * Icon slot for streaming blocks: shows a spinner while [isStreaming] is true,
+ * briefly flashes a checkmark when streaming ends, then settles to [staticIcon].
+ */
+@Composable
+private fun StreamingIcon(
+    isStreaming: Boolean,
+    staticIcon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    checkDurationMs: Int = 700,
+) {
+    var showCheck by remember { mutableStateOf(false) }
+    var wasStreaming by remember { mutableStateOf(isStreaming) }
+    LaunchedEffect(isStreaming) {
+        if (wasStreaming && !isStreaming) {
+            showCheck = true
+            kotlinx.coroutines.delay(checkDurationMs.toLong())
+            showCheck = false
+        }
+        wasStreaming = isStreaming
+    }
+    when {
+        isStreaming -> StreamingIndicator(tint = tint, modifier = modifier)
+        showCheck -> Icon(
+            imageVector = Icons.Default.Check,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = modifier.size(16.dp),
+        )
+        else -> Icon(
+            imageVector = staticIcon,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = modifier.size(16.dp),
+        )
+    }
+}
+
+/**
+ * Blinking caret shown at the tail of streaming assistant text.
+ */
+@Composable
+private fun TypingCursor(
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    val transition = rememberInfiniteTransition(label = "cursor")
+    val alpha by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "blink",
+    )
+    Text(
+        text = "▍",
+        color = color.copy(alpha = alpha),
+        style = MaterialTheme.typography.bodyLarge,
+        modifier = modifier,
+    )
 }

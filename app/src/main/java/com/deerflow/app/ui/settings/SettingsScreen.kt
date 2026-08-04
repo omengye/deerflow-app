@@ -37,13 +37,13 @@ fun SettingsScreen(
     val saved by vm.settings.collectAsStateWithLifecycle()
 
     var endpoint by remember { mutableStateOf(saved.endpoint) }
-    var headers by remember { mutableStateOf(saved.headersJson) }
+    var token by remember { mutableStateOf(saved.token) }
     var initialState by remember { mutableStateOf(saved.initialStateJson) }
 
     // Seed fields once the stored values arrive.
     LaunchedEffect(saved) {
         endpoint = saved.endpoint
-        headers = saved.headersJson
+        token = saved.token
         initialState = saved.initialStateJson
     }
 
@@ -75,11 +75,12 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             OutlinedTextField(
-                value = headers,
-                onValueChange = { headers = it },
-                label = { Text("Headers (JSON object, optional)") },
-                placeholder = { Text("{\"Authorization\":\"Bearer ...\"}") },
-                textStyle = androidx.compose.ui.text.TextStyle(fontFamily = FontFamily.Monospace),
+                value = token,
+                onValueChange = { token = it },
+                label = { Text("Token (optional)") },
+                placeholder = { Text("paste your token here") },
+                supportingText = { Text("Sent as Authorization: Bearer <token>") },
+                singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
             )
             OutlinedTextField(
@@ -92,7 +93,7 @@ fun SettingsScreen(
             )
             Button(
                 onClick = {
-                    vm.save(endpoint, headers, initialState)
+                    vm.save(endpoint, token, initialState)
                     onBack()
                 },
                 modifier = Modifier.fillMaxWidth().padding(top = 20.dp),
