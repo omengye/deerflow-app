@@ -51,6 +51,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -163,7 +164,7 @@ fun BlockCard(
                     Card(
                         shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 2.dp),
                         colors = CardDefaults.cardColors(containerColor = scheme.secondary),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.3f))
+                        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.15f))
                     ) {
                         Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
                             MarkdownText(
@@ -187,7 +188,7 @@ fun BlockCard(
                 var expanded by remember { mutableStateOf(false) }
                 val isThinking = block.kind == BlockKind.THINKING
                 val title = if (isThinking) "Thinking Process" else "Reasoning Output"
-                val icon = if (isThinking) Icons.Default.Info else Icons.Default.Build
+                val icon = Icons.Default.Psychology
                 val accentColor = scheme.tertiary
                 val baseContainerColor = scheme.secondaryContainer.copy(alpha = 0.3f)
                 val streamingContainerColor = accentColor.copy(alpha = 0.18f)
@@ -876,8 +877,8 @@ private fun MarkdownText(
                 is MarkdownBlock.CodeBlock -> {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = scheme.surfaceVariant.copy(alpha = 0.4f)),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.2f))
+                        colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainer),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.2f))
                     ) {
                         Column(Modifier.padding(10.dp)) {
                             if (block.language.isNotEmpty()) {
@@ -1249,8 +1250,8 @@ private fun MarkdownTable(
     modifier: Modifier = Modifier
 ) {
     val scheme = MaterialTheme.colorScheme
-    val borderColor = scheme.outline.copy(alpha = 0.3f)
-    val headerBg = scheme.surfaceVariant.copy(alpha = 0.5f)
+    val borderColor = scheme.outlineVariant.copy(alpha = 0.25f)
+    val headerBg = scheme.surfaceContainer
 
     Box(
         modifier = modifier

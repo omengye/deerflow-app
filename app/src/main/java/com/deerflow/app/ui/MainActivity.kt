@@ -7,16 +7,19 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import com.deerflow.app.ui.chat.ChatScreen
 import com.deerflow.app.ui.chat.ChatViewModel
 import com.deerflow.app.ui.proposal.ProposalScreen
@@ -24,6 +27,7 @@ import com.deerflow.app.ui.proposal.ProposalViewModel
 import com.deerflow.app.ui.settings.SettingsScreen
 import com.deerflow.app.ui.theme.DeerflowTheme
 import kotlinx.coroutines.delay
+import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
 
@@ -47,11 +51,18 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { CHAT, APPROVALS, SETTINGS }
+@Serializable
+private object ChatRoute
+
+@Serializable
+private object ApprovalsRoute
+
+@Serializable
+private object SettingsRoute
 
 @Composable
 private fun AppRoot() {
-    var screen by remember { mutableStateOf(Screen.CHAT) }
+    val navController = rememberNavController()
     val chatVm: ChatViewModel = viewModel()
     val proposalVm: ProposalViewModel = viewModel()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -65,15 +76,53 @@ private fun AppRoot() {
         }
     }
 
-    when (screen) {
-        Screen.CHAT -> ChatScreen(
-            vm = chatVm,
-            proposalVm = proposalVm,
-            onOpenApprovals = { screen = Screen.APPROVALS },
-            onOpenSettings = { screen = Screen.SETTINGS },
-        )
-        Screen.APPROVALS -> ProposalScreen(vm = proposalVm, onBack = { screen = Screen.CHAT })
-        Screen.SETTINGS -> SettingsScreen(onBack = { screen = Screen.CHAT })
+    NavHost(
+        navController = navController,
+        startDestination = ChatRoute,
+        enterTransition = {
+            slideIntoContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Left,
+                animationSpec = tween(300)
+            ) + fadeIn(animationSpec = tween(300))
+        },
+        exitTransition = {
+            slideOutOfContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Left,
+                animationSpec = tween(300)
+            ) + fadeOut(animationSpec = tween(300))
+        },
+        popEnterTransition = {
+            slideIntoContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Right,
+                animationSpec = tween(300)
+            ) + fadeIn(animationSpec = tween(300))
+        },
+        popExitTransition = {
+            slideOutOfContainer(
+                towards = AnimatedContentTransitionScope.SlideDirection.Right,
+                animationSpec = tween(300)
+            ) + fadeOut(animationSpec = tween(300))
+        }
+    ) {
+        composable<ChatRoute> {
+            ChatScreen(
+                vm = chatVm,
+                proposalVm = proposalVm,
+                onOpenApprovals = { navController.navigate(ApprovalsRoute) },
+                onOpenSettings = { navController.navigate(SettingsRoute) },
+            )
+        }
+        composable<ApprovalsRoute> {
+            ProposalScreen(
+                vm = proposalVm,
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable<SettingsRoute> {
+            SettingsScreen(
+                onBack = { navController.popBackStack() },
+            )
+        }
     }
 }
 

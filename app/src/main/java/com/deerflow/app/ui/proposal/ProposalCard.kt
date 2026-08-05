@@ -1,5 +1,6 @@
 package com.deerflow.app.ui.proposal
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -48,9 +49,11 @@ fun ProposalCard(
     val pending = proposal.status == "pending_review"
 
     Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = scheme.surfaceVariant.copy(alpha = 0.45f)),
-        border = BorderStroke(1.dp, riskColor(proposal.risk).copy(alpha = 0.65f)),
+        modifier = modifier
+            .fillMaxWidth()
+            .animateContentSize(),
+        colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainerHigh),
+        border = BorderStroke(1.dp, riskColor(proposal.risk).copy(alpha = 0.45f)),
     ) {
         Column(
             modifier = Modifier.padding(14.dp),
