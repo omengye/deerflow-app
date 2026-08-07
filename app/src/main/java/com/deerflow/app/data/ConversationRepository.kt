@@ -131,7 +131,7 @@ class ConversationRepository(
                     replay = ReplayState.from(loaded.history),
                 )
             }
-            ensureProvisionalThreadMetaLocked(session.threadId)
+            ensureProvisionalThreadMetaLocked(session.threadId, updateLastActive = true)
             launchRunSessionLocked(session, recovering = true)
         }
         saveRunSessionsLocked()
@@ -223,14 +223,6 @@ class ConversationRepository(
             mutex.withLock {
                 val loaded = statesByThread[threadId] ?: loadThreadInternal(threadId).also { statesByThread[threadId] = it }
                 setCurrentThreadLocked(threadId, loaded)
-
-                // Update index timestamp
-                val currentMeta = _threads.value
-                val existing = currentMeta.find { it.id == threadId }
-                if (existing != null) {
-                    val updated = currentMeta.filterNot { it.id == threadId } + existing.copy(lastActive = System.currentTimeMillis())
-                    saveIndex(updated)
-                }
             }
             val cfg = settings.current()
             syncThreadInfo(threadId, AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState()))
@@ -334,7 +326,7 @@ class ConversationRepository(
                         )
                     }
                     updateThreadStateLocked(threadId) { nextState }
-                    ensureProvisionalThreadMetaLocked(threadId)
+                    ensureProvisionalThreadMetaLocked(threadId, updateLastActive = true)
                     saveCurrentThread(nextState)
                     startRun(threadId, emptyList())
                 }
@@ -770,7 +762,11 @@ class ConversationRepository(
         )
     }
 
-    private fun ensureProvisionalThreadMetaLocked(threadId: String, nowMillis: Long = System.currentTimeMillis()) {
+    private fun ensureProvisionalThreadMetaLocked(
+        threadId: String,
+        nowMillis: Long = System.currentTimeMillis(),
+        updateLastActive: Boolean = false,
+    ) {
         if (threadId in deletedThreadIds) return
 
         val currentMeta = _threads.value
@@ -780,7 +776,7 @@ class ConversationRepository(
             val title = existing.title.takeIf { it.isNotBlank() } ?: provisionalThreadTitle(nowMillis)
             currentMeta.filterNot { it.id == threadId } + existing.copy(
                 title = title,
-                lastActive = nowMillis,
+                lastActive = if (updateLastActive) nowMillis else existing.lastActive,
                 isTitleFetched = hasFetchedTitle,
             )
         } else {
