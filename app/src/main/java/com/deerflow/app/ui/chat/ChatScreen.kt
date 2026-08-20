@@ -115,6 +115,7 @@ fun ChatScreen(
     val threadProposals = remember(proposalState.proposals, state.threadId) {
         proposalState.proposals
             .filter { it.trigger.threadId == state.threadId }
+            .filterNot { it.status in FINAL_PROPOSAL_STATUSES }
             .sortedBy { it.createdAt }
             .take(MAX_THREAD_PROPOSAL_CARDS)
     }
@@ -350,6 +351,7 @@ private fun Transcript(
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
+    var previousItemCount by remember(state.threadId) { mutableStateOf(0) }
 
     // Map each proposal ID to its anchor block index when first introduced in this thread session.
     val proposalAnchors = remember(state.threadId) { mutableMapOf<String, Int>() }
@@ -376,8 +378,11 @@ private fun Transcript(
         result
     }
 
-    LaunchedEffect(itemsList.size) {
-        if (itemsList.isNotEmpty()) listState.animateScrollToItem(itemsList.size - 1)
+    LaunchedEffect(itemsList.size, state.threadId) {
+        val currentItemCount = itemsList.size
+        val itemsWereAdded = currentItemCount > previousItemCount
+        previousItemCount = currentItemCount
+        if (itemsWereAdded) listState.animateScrollToItem(currentItemCount - 1)
     }
 
     if (itemsList.isEmpty()) {
@@ -463,6 +468,13 @@ private fun ProposalInboxButton(pendingCount: Int, onClick: () -> Unit) {
 }
 
 private const val MAX_THREAD_PROPOSAL_CARDS = 3
+
+private val FINAL_PROPOSAL_STATUSES = setOf(
+    "published",
+    "rejected",
+    "failed",
+    "stale",
+)
 
 private val STREAMING_KINDS = setOf(
     com.deerflow.app.domain.BlockKind.ASSISTANT,
