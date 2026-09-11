@@ -9,6 +9,7 @@ import com.deerflow.app.data.agui.UploadFilePart
 import com.deerflow.app.data.agui.UploadedFile
 import com.deerflow.app.data.agui.AguiJson
 import com.deerflow.app.data.settings.SettingsStore
+import com.deerflow.app.data.settings.AppSettings
 import com.deerflow.app.domain.BlockKind
 import com.deerflow.app.domain.ConversationReducer
 import com.deerflow.app.domain.ConversationState
@@ -276,6 +277,7 @@ class ConversationRepository(
             mutex.withLock { updateForegroundServiceLocked() }
             try {
                 val threadId = mutex.withLock { currentThreadId }
+                val runSettings = settings.current()
                 val jobToJoin = cancelRunJob(threadId, cancelBackend = true)
                 jobToJoin?.cancel()
                 jobToJoin?.join()
@@ -290,7 +292,7 @@ class ConversationRepository(
                         updateThreadStateLocked(threadId) { it.copy(status = "Uploading ${attachments.size} attachment(s)...") }
                     }
 
-                    val cfg = settings.current()
+                    val cfg = runSettings
                     val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
                     val parts = attachments.map { it.toUploadFilePart() }
                     val uploadResult = runCatching { client.uploadFiles(threadId, parts) }
@@ -328,7 +330,7 @@ class ConversationRepository(
                     updateThreadStateLocked(threadId) { nextState }
                     ensureProvisionalThreadMetaLocked(threadId, updateLastActive = true)
                     saveCurrentThread(nextState)
-                    startRun(threadId, emptyList())
+                    startRun(threadId, emptyList(), runSettings)
                 }
             } finally {
                 activeOperations.decrementAndGet()
@@ -345,6 +347,7 @@ class ConversationRepository(
             mutex.withLock { updateForegroundServiceLocked() }
             try {
                 val threadId = mutex.withLock { currentThreadId }
+                val runSettings = settings.current()
                 val jobToJoin = cancelRunJob(threadId, cancelBackend = true)
                 jobToJoin?.cancel()
                 jobToJoin?.join()
@@ -355,7 +358,7 @@ class ConversationRepository(
                     // in the meantime rather than recreating its state (startRun guards too).
                     if (threadId in deletedThreadIds) return@withLock
                     updateThreadStateLocked(threadId) { it.copy(interrupts = emptyList()).removeBlock("interrupts") }
-                    startRun(threadId, entries)
+                    startRun(threadId, entries, runSettings)
                 }
             } finally {
                 activeOperations.decrementAndGet()
@@ -392,7 +395,7 @@ class ConversationRepository(
         }
     }
 
-    private fun startRun(threadId: String, resume: List<ResumeEntry>) {
+    private fun startRun(threadId: String, resume: List<ResumeEntry>, runSettings: AppSettings) {
         // The caller captured threadId before awaiting (backend cancel, attachment
         // upload), releasing the lock in between; the thread may have been deleted
         // since. Starting a run here would resurrect its in-memory state, hold the
@@ -405,6 +408,7 @@ class ConversationRepository(
         val session = RunSession(
             threadId = threadId,
             runId = AguiClient.newRunId(),
+            modelName = runSettings.modelName,
             history = snapshot.history,
             resume = resume,
             reconnectUntilEpochMillis = now + STREAM_RECONNECT_WINDOW_MS,
@@ -412,10 +416,10 @@ class ConversationRepository(
         )
         runSessionsByThread[threadId] = session
         saveRunSessionsLocked()
-        launchRunSessionLocked(session, recovering = false)
+        launchRunSessionLocked(session, recovering = false, runSettings = runSettings)
     }
 
-    private fun launchRunSessionLocked(session: RunSession, recovering: Boolean) {
+    private fun launchRunSessionLocked(session: RunSession, recovering: Boolean, runSettings: AppSettings? = null) {
         val threadId = session.threadId
         val runId = session.runId
         val historyToSend = session.history
@@ -432,7 +436,9 @@ class ConversationRepository(
         val job = scope.launch(start = CoroutineStart.LAZY) {
             val myJob = coroutineContext[Job]
             var lastSavedHistorySize = historyToSend.size
-            val cfg = settings.current()
+            // Keep the selected model paired with the connection used for this send,
+            // including when attachments delayed the start of the run.
+            val cfg = runSettings ?: settings.current()
             val client = AguiClient(cfg.endpoint, cfg.headers(), cfg.initialState())
             var retryAttempt = 0
             var reconnecting = recovering
@@ -484,7 +490,7 @@ class ConversationRepository(
                                 throw IOException("Network unavailable until reconnect deadline")
                             }
                         }
-                        client.runStream(threadId, runId, historyToSend, resume, resumeEventId)
+                        client.runStream(threadId, runId, historyToSend, resume, resumeEventId, session.modelName)
                             .collect { event ->
                                 mutex.withLock {
                                     if (runJobsByThread[threadId] == myJob) {

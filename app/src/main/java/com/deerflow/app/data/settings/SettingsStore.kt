@@ -7,6 +7,9 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.deerflow.app.data.agui.AguiJson
+import com.deerflow.app.data.models.resolveApiBaseUrl
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -21,7 +24,19 @@ data class AppSettings(
     val endpoint: String = DEFAULT_ENDPOINT,
     val token: String = "",
     val initialStateJson: String = "",
+    val modelSelections: Map<String, String> = emptyMap(),
 ) {
+    val modelName: String?
+        get() = runCatching { modelSelections[resolveApiBaseUrl(endpoint).toString()] }
+            .getOrNull()?.takeIf { it.isNotBlank() }
+
+    fun withModel(name: String?): AppSettings {
+        val key = resolveApiBaseUrl(endpoint).toString()
+        val choices = modelSelections.toMutableMap()
+        if (name.isNullOrBlank()) choices.remove(key) else choices[key] = name
+        return copy(modelSelections = choices)
+    }
+
     /**
      * Build the Authorization header map from [token].
      *
@@ -51,6 +66,8 @@ class SettingsStore(private val context: Context) {
     private val tokenKey = stringPreferencesKey("token")
     private val legacyHeadersKey = stringPreferencesKey("headers")
     private val initialStateKey = stringPreferencesKey("initial_state")
+    private val modelSelectionsKey = stringPreferencesKey("model_selections")
+    private val modelSelectionsSerializer = MapSerializer(String.serializer(), String.serializer())
 
     val flow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
         AppSettings(
@@ -58,6 +75,9 @@ class SettingsStore(private val context: Context) {
             token = prefs[tokenKey]?.takeIf { it.isNotBlank() }
                 ?: prefs[legacyHeadersKey]?.let { extractTokenFromLegacyHeaders(it) }.orEmpty(),
             initialStateJson = prefs[initialStateKey].orEmpty(),
+            modelSelections = runCatching {
+                AguiJson.decodeFromString(modelSelectionsSerializer, prefs[modelSelectionsKey] ?: "{}")
+            }.getOrDefault(emptyMap()),
         )
     }
 
@@ -68,6 +88,7 @@ class SettingsStore(private val context: Context) {
             prefs[endpointKey] = settings.endpoint.trim()
             prefs[tokenKey] = settings.token.trim()
             prefs[initialStateKey] = settings.initialStateJson.trim()
+            prefs[modelSelectionsKey] = AguiJson.encodeToString(modelSelectionsSerializer, settings.modelSelections)
             prefs.remove(legacyHeadersKey)
         }
     }

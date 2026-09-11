@@ -64,6 +64,20 @@ Tap the **gear icon** → set:
 
 Settings persist via DataStore and apply to the next run.
 
+The **使用模型** selector loads available models from `GET /api/models` using the
+server address and Token currently entered in Settings. Choose **跟随后端默认**
+to let the backend select its default, or choose a configured model. Selections
+are saved separately for each API base URL and take effect on the next message,
+including in an existing conversation. Settings closes only after saving succeeds.
+Active runs retain their selected model across reconnects and app restarts.
+
+The DeerFlow backend must accept the top-level `modelName` field on
+`POST /api/chat/agui`. A default selection omits this field. If a saved model
+is no longer in the server's model list, select another model or the default
+before saving. Refresh errors preserve the saved choice and offer retry.
+Independent backend model assignments (such as fixed subagent models) continue
+to follow their own configuration.
+
 ## Thread history
 
 Conversations are organized into threads. A navigation drawer (swipe from the

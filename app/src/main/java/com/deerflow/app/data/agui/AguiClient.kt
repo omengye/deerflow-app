@@ -189,10 +189,12 @@ class AguiClient(
         history: List<ChatMessage>,
         resume: List<ResumeEntry> = emptyList(),
         lastEventId: String? = null,
+        modelName: String? = null,
     ): Flow<AguiEvent> = flow {
         val payload = RunAgentInput(
             runId = runId,
             threadId = threadId,
+            modelName = modelName?.takeIf { it.isNotBlank() },
             state = initialState.takeIf { it.isNotEmpty() },
             messages = history.map {
                 it.copy(

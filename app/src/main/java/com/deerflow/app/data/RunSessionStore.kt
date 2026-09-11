@@ -11,6 +11,7 @@ import java.io.File
 internal data class RunSession(
     val threadId: String,
     val runId: String,
+    val modelName: String? = null,
     @Transient
     val history: List<ChatMessage> = emptyList(),
     @Transient

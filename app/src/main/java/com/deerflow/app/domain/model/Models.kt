@@ -50,6 +50,8 @@ data class RunAgentInput(
     val threadId: String,
     val state: JsonObject? = null,
     val messages: List<ChatMessage>,
+    @SerialName("modelName")
+    val modelName: String? = null,
     val tools: List<JsonObject>? = null,
     val context: JsonObject? = null,
     @SerialName("forwardedProps")
