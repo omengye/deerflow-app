@@ -83,6 +83,7 @@ class ConversationRepository(
         val checkpoint = Channel<Unit>(Channel.CONFLATED)
         val artifactLoading = mutableSetOf<String>()
         lateinit var artifacts: WakuTaskArtifacts
+        lateinit var toolApproval: WakuToolApproval
     }
     @Volatile private var active: Link? = null
     @Volatile private var profile: Profile? = null
@@ -153,12 +154,17 @@ class ConversationRepository(
                 ensureCurrent(link)
                 link.client.request(command, session, runtime)
             }
+            link.toolApproval = WakuToolApproval { command, session, runtime ->
+                ensureCurrent(link)
+                link.client.request(command, session, runtime)
+            }
             active = link
             val failure = try {
                 runConnection(link)
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { error }
             finally {
+                link.toolApproval.disconnected()
                 link.artifacts.disconnected()
                 link.client.close()
                 withContext(NonCancellable) {
@@ -359,6 +365,7 @@ class ConversationRepository(
             }
             for (wire in page.objs("events")) {
                 link.artifacts.onWireEvent(wire)
+                link.toolApproval.onWireEvent(wire)
                 val event = wire["event"] as? JsonObject ?: continue
                 val payload = event["payload"] as? JsonObject
                 when (event.s("kind")) {
@@ -397,6 +404,7 @@ class ConversationRepository(
 
     private suspend fun receiveEvent(link: Link, wire: JsonObject) {
         link.artifacts.onWireEvent(wire)
+        link.toolApproval.onWireEvent(wire)
         mutex.withLock {
             ensureCurrent(link)
             val id = wire.s("sessionId") ?: return
@@ -585,7 +593,7 @@ class ConversationRepository(
                     startDispatched = true
                     link.client.request(wakuCommand("start") {
                         put("options", buildJsonObject {
-                            put("provider", "deerFlow"); put("binary", binary); put("cwd", cwd); put("mode", snapshot.session.s("runtime_mode") ?: "ask")
+                            put("provider", "deerFlow"); put("binary", binary); put("cwd", cwd); put("mode", WakuToolApproval.RUNTIME_MODE)
                             put("model", primitive(link.profile.config.modelName))
                             put("reasoningEffort", snapshot.session["reasoning_effort"] ?: JsonNull)
                             put("thinkingMode", snapshot.session["thinking_mode"] ?: JsonNull)
@@ -611,7 +619,7 @@ class ConversationRepository(
             if (!createdRuntime && (current.session["model"] ?: JsonNull) != desiredModel) {
                 val applied = link.client.request(wakuCommand("applyOptions") {
                     put("options", buildJsonObject {
-                        put("mode", current.session.s("runtime_mode") ?: "ask"); put("model", desiredModel)
+                        put("mode", WakuToolApproval.RUNTIME_MODE); put("model", desiredModel)
                         put("reasoningEffort", current.session["reasoning_effort"] ?: JsonNull)
                         put("thinkingMode", current.session["thinking_mode"] ?: JsonNull)
                         put("serviceTier", current.session["service_tier"] ?: JsonNull)
@@ -620,10 +628,16 @@ class ConversationRepository(
                 }, id, requireNotNull(runtimeId))
                 require(applied.s("type") == "optionsApplied" && applied.b("applied")) { "服务器未应用所选模型，消息尚未发送；运行时未重启" }
             }
+            // A resumed DeerFlow session retains its backend approval policy. A runtime mode
+            // or an applyOptions ACK alone cannot confirm Full Access.
+            link.toolApproval.ensureFullAccess(id, requireNotNull(runtimeId))
             mutex.withLock {
                 ensureCurrent(link)
                 val latest = link.profile.snapshots.getValue(id)
-                putSnapshot(link.profile, id, latest.copy(session = latest.session.patch("model" to desiredModel)))
+                require(latest.session.s("status") !in BUSY) { "服务器会话已开始执行；消息尚未发送" }
+                putSnapshot(link.profile, id, latest.copy(session = latest.session.patch(
+                    "model" to desiredModel, "runtime_mode" to JsonPrimitive(WakuToolApproval.RUNTIME_MODE),
+                )))
             }
             updatePending(link, id, requestId, "sending", uploaded)
             promptDispatched = true

@@ -254,159 +254,47 @@ fun BlockCard(
             }
 
             BlockKind.TOOL -> {
-                // Tool Call or Tool Result: Collapsible Box (matching Thinking style)
-                var expanded by remember { mutableStateOf(false) }
-                val isToolCall = remember(block.header) { block.header.contains("TOOL_CALL") }
-
-                val title = remember(block.header, block.content, block.tool) {
-                    if (isToolCall) {
-                        // Read the structured name; block.content is a " | "-joined summary
-                        // that cannot be split back apart, since arguments and results
-                        // legitimately contain "|" (grep patterns, shell pipes, MD tables).
-                        val toolName = block.tool?.name?.takeIf { it.isNotBlank() }
-                            ?: block.content.substringBefore(" | ").lineSequence().firstOrNull()?.trim().orEmpty()
-                        if (toolName.isNotEmpty()) "Tool Call: $toolName" else "Tool Call"
-                    } else {
-                        val toolId = block.header.substringAfter("#", "").trim()
-                        if (toolId.isNotEmpty()) "Tool Result: #$toolId" else "Tool Result"
-                    }
-                }
-
-                val accentColor = scheme.primary
-                val baseContainerColor = scheme.surfaceVariant.copy(alpha = 0.4f)
-                val streamingContainerColor = accentColor.copy(alpha = 0.18f)
-                val containerColor by animateColorAsState(
-                    targetValue = if (isStreaming) streamingContainerColor else baseContainerColor,
-                    animationSpec = tween(durationMillis = 400, easing = FastOutSlowInEasing),
-                    label = "toolBg",
-                )
-
+                val tool = block.tool
+                val failed = tool?.isError == true
+                val running = tool?.isRunning == true && !failed
+                val name = tool?.name?.trim()?.takeIf { it.isNotEmpty() } ?: "工具调用"
+                val accent = if (failed) scheme.error else scheme.primary
                 Card(
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .fillMaxWidth()
-                        .animateContentSize(),
-                    colors = CardDefaults.cardColors(containerColor = containerColor),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.2f))
+                    modifier = Modifier.align(Alignment.CenterStart).fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor =
+                        if (failed) scheme.errorContainer.copy(alpha = 0.22f)
+                        else scheme.surfaceVariant.copy(alpha = 0.25f)),
                 ) {
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { expanded = !expanded }
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(
-                                modifier = Modifier.weight(1f, fill = false),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                StreamingIcon(
-                                    isStreaming = isStreaming,
-                                    staticIcon = Icons.Default.Build,
-                                    tint = accentColor,
-                                    contentDescription = "Tool Call",
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = title,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = scheme.onSurfaceVariant,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            Spacer(Modifier.width(8.dp))
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        if (running) {
+                            CircularProgressIndicator(Modifier.size(18.dp), color = accent, strokeWidth = 2.dp)
+                        } else {
                             Icon(
-                                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                contentDescription = "Toggle",
-                                tint = scheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                modifier = Modifier.size(20.dp)
+                                imageVector = if (failed) Icons.Default.Warning else Icons.Default.Build,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = if (failed) accent else scheme.onSurfaceVariant,
                             )
                         }
-
-                        if (expanded && block.content.isNotBlank()) {
-                            HorizontalDivider(color = scheme.outline.copy(alpha = 0.15f))
-
-                            if (isToolCall) {
-                                // Read the structured fields rather than splitting block.content
-                                // on "|": arguments and results legitimately contain that
-                                // character (grep patterns, shell pipes, Markdown tables), so
-                                // splitting truncated arguments and dropped results outright.
-                                val args = remember(block.tool) { block.tool?.args.orEmpty() }
-                                val result = remember(block.tool) { block.tool?.result.orEmpty() }
-
-                                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                                    if (args.isNotEmpty()) {
-                                        Text(
-                                            text = "Arguments:",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = scheme.primary.copy(alpha = 0.8f)
-                                        )
-                                        Spacer(Modifier.height(2.dp))
-                                        SelectionContainer {
-                                            Text(
-                                                text = args,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = scheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                    if (result.isNotEmpty()) {
-                                        if (args.isNotEmpty()) Spacer(Modifier.height(8.dp))
-                                        Text(
-                                            text = "Result:",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = scheme.primary.copy(alpha = 0.8f)
-                                        )
-                                        Spacer(Modifier.height(2.dp))
-                                        val safeResult = remember(result) {
-                                            if (result.length > 8000) result.take(8000) + "\n\n[truncated for display]" else result
-                                        }
-                                        Box(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .heightIn(max = 240.dp)
-                                                .verticalScroll(rememberScrollState())
-                                        ) {
-                                            SelectionContainer {
-                                                Text(
-                                                    text = safeResult,
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    fontFamily = FontFamily.Monospace,
-                                                    color = scheme.onSurfaceVariant
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Tool result raw content (usually JSON)
-                                val safeContent = remember(block.content) {
-                                    if (block.content.length > 8000) block.content.take(8000) + "\n\n[truncated for display]" else block.content
-                                }
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(max = 240.dp)
-                                        .verticalScroll(rememberScrollState())
-                                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                                ) {
-                                    SelectionContainer {
-                                        Text(
-                                            text = safeContent,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = scheme.onSurfaceVariant.copy(alpha = 0.85f)
-                                        )
-                                    }
-                                }
-                            }
+                        Text(
+                            text = name,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (tool != null) {
+                            Text(
+                                text = when { failed -> "失败"; running -> "运行中"; else -> "已完成" },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (failed || running) accent else scheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }

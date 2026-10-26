@@ -40,11 +40,23 @@ flowchart LR
 
 当前 v10 的审批请求不在会话快照中，所以恢复时需要扫描存活 runtime 的日志重建交互卡；正文仍按已保存游标去重。若 runtime 已不存在，清理过期交互卡。原生历史导入有条数和字段限制，只能补充缺失记录，不能覆盖已经保存的完整正文和工具块。
 
+## Full Access 的服务端确认
+
+新 runtime 使用 `start.options.mode = fullAccess`。已有原生会话恢复会保留旧审批策略，`applyOptions` 的 mode 也不会改变 DeerFlow 权限，因此发出用户消息前还需确认 `toolApprovalChanged` 的权威状态。若状态为 `ask` 或 `reject_always`，使用当前 session/runtime 发送 `setToolApproval(allow_always)`，只在收到匹配的 `toolApproval` 确认后发送 prompt；`allow_always` 或部署策略 `off` 可直接继续。
+
+权限跟踪器仅保存本连接上的事件证据，按 session/runtime/epoch/sequence 隔离；本地 `runtime_mode` 不是授权依据。断线和超时不会自动重复切换权限或发送 prompt。活动轮次及挂起审批仍由服务端约束，不把 Full Access 实现为客户端自动点击全部审批卡。
+
 ## 写操作与附件
 
 发送前先原子保存原文、附件引用及命令 ID，再上传附件、发送 prompt。只有本地保存成功才清空输入框。断线后不自动重发 prompt、审批或取消；通过精确 message ID 核对 prompt，不能按相同文字猜测已经发送。
 
 请求失败区分确定未发送、服务端拒绝、结果未知。结果未知保留原文和提示，后续动作由用户显式发起。附件上传失败不降级成只发文字。产物按服务器授权读取，校验大小、偏移及摘要后保存到客户端私有缓存；外部 URL 不携带 daemon Token。
+
+## 工具调用展示
+
+采用“名称 + 状态”的紧凑列表：结构化工具名优先，完成事件更新同一调用行；运行指示根据该调用的 complete/failed 状态，不根据“最后一条消息”推测。参数和返回内容不进入工具行，也不提供详情展开。旧记录缺少可靠名称时使用工具类型，不以路径、命令文本或返回内容冒充名称。
+
+参考 [VS Code 工具调用默认折叠详情](https://code.visualstudio.com/docs/agents/run/tools)与 [Material 列表的名称、前置图标和尾部状态结构](https://m3.material.io/components/lists/overview)，并按本项目要求完全隐藏工具详情。会话原始数据仍保留，保证恢复与其他客户端兼容。
 
 ## 边界与后续服务端能力
 

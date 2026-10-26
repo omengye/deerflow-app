@@ -16,7 +16,7 @@ class WakuProjectionTest {
         val project = WakuProjection.createProject(projectId, "Project", "/workspace", 1_700_000_000_123)
         val session = WakuProjection.createSession(sessionId, projectId, "test-model", 1_700_000_000_123)
         assertEquals("deerFlow", session["provider"]!!.jsonPrimitive.content)
-        assertEquals("ask", session["runtime_mode"]!!.jsonPrimitive.content)
+        assertEquals("fullAccess", session["runtime_mode"]!!.jsonPrimitive.content)
         assertEquals("local", session["workspace"]!!.jsonObject["kind"]!!.jsonPrimitive.content)
         assertEquals(1_700_000_000L, session["created_at"]!!.jsonPrimitive.long)
         assertEquals(project["created_at"], session["created_at"])
@@ -36,6 +36,18 @@ class WakuProjectionTest {
         val cursor = active.session["runtime_event_cursor"]!!.jsonObject
         assertEquals(raw["runtimeId"], cursor["runtime_id"])
         assertFalse(cursor.containsKey("runtimeId"))
+    }
+
+    @Test fun backendApprovalEventsOverrideRememberedModeWithoutDismissingPermissionCards() {
+        val ask = reduce(initial, 1, "toolApprovalChanged", JsonPrimitive("ask"))
+        assertEquals("ask", ask.session["runtime_mode"]!!.jsonPrimitive.content)
+        val full = reduce(ask, 2, "toolApprovalChanged", JsonPrimitive("allow_always"))
+        assertEquals("fullAccess", full.session["runtime_mode"]!!.jsonPrimitive.content)
+        val permission = reduce(full, 3, "permission", buildJsonObject { put("requestId", "special-approval") })
+        val off = reduce(permission, 4, "toolApprovalChanged", JsonPrimitive("off"))
+        assertEquals("fullAccess", off.session["runtime_mode"]!!.jsonPrimitive.content)
+        assertEquals(permission.permissions, off.permissions)
+        assertEquals(off, reduce(off, 1, "toolApprovalChanged", JsonPrimitive("ask")))
     }
 
     @Test fun replayDoesNotDuplicateIdenticalTextButDistinctEventsDo() {
@@ -75,6 +87,37 @@ class WakuProjectionTest {
         val reopened = WakuProjection.fromSession(state.session)
         assertEquals(display.blocks, WakuProjection.display(reopened).blocks)
         assertEquals(state, reduce(state, 5, "activity", tool("call-1", "Read file", true)))
+    }
+
+    @Test fun toolNameAndCompletionSurviveResultUpdatesAndHistoryHydration() {
+        var state = reduce(initial, 1, "promptSubmitted", prompt("turn", "message", "inspect"))
+        state = reduce(state, 2, "richActivity", buildJsonObject {
+            put("id", "call"); put("kind", "fileRead"); put("tool_name", "read_file")
+            put("title", "/private/report.txt"); put("arguments", """{"path":"/private/report.txt"}""")
+            put("complete", false)
+        })
+        val running = WakuProjection.display(state).blocks.single { it.kind == BlockKind.TOOL }
+        assertEquals("read_file", running.tool!!.name)
+        assertTrue(running.tool.isRunning)
+        state = reduce(state, 3, "richActivity", buildJsonObject {
+            put("id", "call"); put("title", "Tool Result"); put("output", "private-result"); put("complete", true)
+        })
+        val completed = WakuProjection.display(state).blocks.single { it.kind == BlockKind.TOOL }
+        assertEquals(running.key, completed.key)
+        assertEquals("read_file", completed.tool!!.name)
+        assertFalse(completed.tool.isRunning)
+        assertTrue(WakuProjection.display(state).running)
+        assertEquals(completed, WakuProjection.display(WakuProjection.fromSession(state.session)).blocks.single { it.kind == BlockKind.TOOL })
+    }
+
+    @Test fun failedToolDoesNotKeepSpinningDuringAnActiveTurn() {
+        val state = reduce(reduce(initial, 1, "promptSubmitted", prompt("turn", "message", "inspect")), 2, "richActivity", buildJsonObject {
+            put("id", "failed"); put("kind", "command"); put("tool_name", "execute")
+            put("failed", true); put("complete", false)
+        })
+        val tool = WakuProjection.display(state).blocks.single { it.kind == BlockKind.TOOL }.tool!!
+        assertTrue(tool.isError)
+        assertFalse(tool.isRunning)
     }
 
     @Test fun identicalToolTitlesRemainDistinctWithoutMatchingIds() {

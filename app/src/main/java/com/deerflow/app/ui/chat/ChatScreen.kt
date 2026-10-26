@@ -316,12 +316,14 @@ fun ChatScreen(
                         .background(scheme.background)
                         .imePadding()
                 ) {
-                    if (!canSend || unknownSubmission != null) {
+                    if (!connected || unknownSubmission != null) {
                         Column(Modifier.fillMaxWidth().background(scheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp)) {
-                            Text(connection, style = MaterialTheme.typography.bodySmall)
-                            Row {
-                                TextButton(onClick = vm::refresh) { Text("重新同步") }
-                                TextButton(onClick = onOpenSettings) { Text("连接设置") }
+                            if (!connected) {
+                                Text(connection, style = MaterialTheme.typography.bodySmall)
+                                Row {
+                                    TextButton(onClick = vm::refresh) { Text("重新同步") }
+                                    TextButton(onClick = onOpenSettings) { Text("连接设置") }
+                                }
                             }
                             unknownSubmission?.let { pending ->
                                 Text("这次操作的结果尚未确认。请先核对会话记录，避免重复执行。", style = MaterialTheme.typography.bodySmall)

@@ -16,11 +16,9 @@ data class DisplayBlock(
      * Structured tool-call fields, set for [BlockKind.TOOL] blocks that come
      * from a tool call (as opposed to a bare tool result replayed from history).
      *
-     * [content] stays a human-readable one-line summary for the collapsed row,
-     * but it joins these fields with " | " and therefore cannot be split back
-     * apart: arguments and results legitimately contain "|" -- a grep pattern
-     * like "foo|bar", a shell pipe, a Markdown table. Renderers must read these
-     * fields rather than parsing [content].
+     * Transcript rows display only the structured name and invocation state.
+     * Arguments/results remain available to history/recovery, but are not rendered.
+     * Never infer the name by splitting [content], which may contain raw payloads.
      */
     val tool: ToolDetails? = null,
     /** Stable protocol message id, when this block represents a message. */
@@ -35,6 +33,8 @@ data class ToolDetails(
     val args: String = "",
     val result: String = "",
     val isError: Boolean = false,
+    /** True only while this tool invocation is still running, independently of the whole turn. */
+    val isRunning: Boolean = false,
 )
 
 enum class BlockKind { USER, ASSISTANT, REASONING, THINKING, TOOL, ARTIFACT, SYSTEM, INTERRUPT, ERROR }

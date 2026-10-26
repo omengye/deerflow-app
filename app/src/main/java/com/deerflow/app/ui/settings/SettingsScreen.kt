@@ -66,6 +66,9 @@ fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
                 enabled = enabled, label = { Text("服务端模型 ID（可选）") },
                 supportingText = { Text("留空跟随后端默认。填写服务器已配置的模型 ID，保存后在新会话生效。") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("工具权限：Full Access", style = MaterialTheme.typography.titleSmall)
+            Text("普通工具自动授权。已有会话在发送下一条消息前应用；服务器要求的特殊审批仍会显示。",
+                style = MaterialTheme.typography.bodySmall)
             if (state.loaded) draft.validationError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             state.saveError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Button(onClick = vm::save, enabled = state.canSave, modifier = Modifier.fillMaxWidth()) {

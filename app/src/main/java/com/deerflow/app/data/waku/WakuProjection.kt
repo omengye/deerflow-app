@@ -31,7 +31,7 @@ object WakuProjection {
     fun createSession(id: String, projectId: String, model: String? = null, nowMillis: Long = System.currentTimeMillis()) = buildJsonObject {
         put("id", id); put("title", "New task"); put("auto_title", JsonNull)
         put("project_id", projectId); put("workspace", obj("kind" to JsonPrimitive("local")))
-        put("provider", "deerFlow"); put("model", primitive(model)); put("runtime_mode", "ask")
+        put("provider", "deerFlow"); put("model", primitive(model)); put("runtime_mode", WakuToolApproval.RUNTIME_MODE)
         put("reasoning_effort", JsonNull); put("thinking_mode", JsonNull); put("service_tier", JsonNull)
         put("context_window", JsonNull); put("agent_preset", JsonNull); put("status", "idle")
         put("created_at", nowMillis / 1000); put("updated_at", nowMillis / 1000); put("last_reply_at", JsonNull)
@@ -82,6 +82,10 @@ object WakuProjection {
             }
             "autoTitleUpdated" -> mutable.values["auto_title"] = primitive(payload.stringOrNull()?.trim()?.takeIf(String::isNotEmpty))
             "agentPresetSelected" -> mutable.values["agent_preset"] = payload
+            "toolApprovalChanged" -> when (payload.stringOrNull()) {
+                "allow_always", "off" -> mutable.values["runtime_mode"] = JsonPrimitive(WakuToolApproval.RUNTIME_MODE)
+                "ask", "reject_always" -> mutable.values["runtime_mode"] = JsonPrimitive("ask")
+            }
             "availableCommands" -> if (payload is JsonArray) mutable.values["available_commands"] = payload
             "goalUpdated" -> mutable.values["thread_goal"] = payload
             "deerflowModelsChanged" -> if (data != null) {
@@ -150,10 +154,17 @@ object WakuProjection {
                         if (activity.text("kind") == "reasoning" || reasoning != null) {
                             blocks += DisplayBlock(key, BlockKind.REASONING, "Reasoning", reasoning?.text("content") ?: activity.text("detail").orEmpty(), turnIndex = turnIndex)
                         } else {
-                            val title = activity.text("title") ?: "Tool"
+                            val name = WakuToolPresentation.name(activity)
                             val detail = activity.text("detail").orEmpty()
-                            blocks += DisplayBlock(key, BlockKind.TOOL, title, detail,
-                                tool = ToolDetails(activity.text("tool_name") ?: title, activity.text("arguments").orEmpty(), activity.text("output") ?: detail, activity.flag("failed") == true), turnIndex = turnIndex)
+                            blocks += DisplayBlock(key, BlockKind.TOOL, name, detail,
+                                tool = ToolDetails(
+                                    name = name,
+                                    args = activity.text("arguments").orEmpty(),
+                                    result = activity.text("output") ?: detail,
+                                    isError = activity.flag("failed") == true,
+                                    isRunning = activity.flag("complete") == false && activity.flag("failed") != true &&
+                                        session.text("status") in setOf("connecting", "working", "waiting", "background"),
+                                ), turnIndex = turnIndex)
                         }
                     }
                 }
