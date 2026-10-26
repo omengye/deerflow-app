@@ -47,8 +47,8 @@ jobs:
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Test, lint and build debug APK
+        run: gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

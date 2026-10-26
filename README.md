@@ -1,158 +1,60 @@
 # DeerFlow Android
 
-An Android client for the **AG-UI protocol** over HTTP/SSE — a port of the
-`deerflow-tui` terminal client's logic to Kotlin + Jetpack Compose.
+原生 Kotlin / Jetpack Compose 客户端，直接连接 DeerFlow 当前分支的 **Waku App Server v10**。手机与桌面使用同一服务端会话；Agent 在服务器运行，关闭手机连接不会发送取消命令。
 
-It connects to any AG-UI-compatible agent backend (LangGraph, CrewAI, Mastra, …)
-via `POST {endpoint}` with a `text/event-stream` response, and renders the
-streaming events (text / reasoning / tool calls / interrupts).
+此版本不再调用 AG-UI、旧模型 REST 或旧技能审批 REST，不提供双后端切换。已有本地聊天记录保留为只读历史，不会自动上传或重发。
 
-## Requirements
+接入取舍、Codex / Claude Code 参考及协议映射见 [架构说明](docs/waku-architecture.md)。
 
-- Android Studio (Ladybug or newer) with **JDK 17**
-- Android SDK Platform **36** installed (minSdk 30 / Android 11)
-- An AG-UI backend reachable from the device/emulator
+## 连接
 
-## Build & run
+在设置中填写：
 
-```bash
-# Open the project in Android Studio and let it sync, OR from a shell with a
-# JDK 17 + Gradle available, generate the wrapper once:
-gradle wrapper --gradle-version 9.5.1
-./gradlew :app:installDebug
+- **服务器地址**：例如 `wss://deerflow.example.com/v1`。Android 模拟器访问宿主机可使用 `ws://10.0.2.2:18787/v1`。
+- **Token**：服务器的 Waku daemon token，通过 WebSocket 首条 `hello` 认证。设备端使用 Android Keystore AES-GCM 加密保存。
+- **服务器工作目录**：例如 `/workspaces`；这是服务器上的路径。
+- **模型 ID**：可选，填写服务器已配置的模型 ID；留空使用服务端默认值。
+
+协议版本不匹配或认证被拒绝时停止自动重试，修正设置后重新连接。原 AG-UI 地址和凭据需要重新配置。公网部署使用 WSS；当前 daemon token 拥有服务端控制权限，应只提供给可信设备。
+
+## 弱网与恢复
+
+- 连接握手超时为 15 秒，WebSocket 每 20 秒检测心跳。
+- 可恢复连接错误使用有上限的指数退避与随机抖动；离线暂停尝试，网络恢复、Wi-Fi/移动网络切换和返回前台时重新同步。
+- 恢复先读取会话、附加现存 runtime，再按 epoch / runtime / sequence 分页补齐事件；连接恢复不会重新执行 prompt 或替换运行中的 Agent。
+- 会话内容、流式片段、游标和待核对操作保存到同一原子快照，按服务器与凭据隔离。
+- 输入草稿与附件引用按会话持久保存；本地写入成功后才清空输入框。附件权限失效时明确提示重新选择。
+- 发消息、取消和审批均不自动重发。请求可能已被服务器执行但回执丢失时，先读取状态；不能确认时展示原文和待核对状态，避免重复写入或工具执行。
+- 取消回执只代表命令已接收；最终停止状态以执行事件为准。
+- 手机进入后台可以断开订阅，任务继续在服务器运行。本版不依赖前台服务维持长任务，也未增加系统推送。
+
+服务端重启不等于普通断线。当前 Waku 重放日志只覆盖存活的 runtime / daemon；客户端使用持久历史核对，并保留无法证明的操作状态，不承诺跨服务器重启的 exactly-once 执行。当前 v10 也未提供统一的待审批快照及跨端审批完成事件，客户端不会捏造已经恢复或已批准的状态。
+
+## 功能
+
+- 服务端会话列表和历史、流式文本/推理/工具活动、独立工具审批与用户问题。
+- 文件和图片上传到服务器托管存储，通过结构化附件引用发送，不拼接 Android 专属提示词。
+- 技能提案通过 Waku 管理 RPC 读取和审查，携带提案版本与基础内容摘要，区分批准与发布结果。
+- 文件预览和下载不向外部链接发送 Waku 凭据。
+
+## 构建与验证
+
+需要 Android SDK 36、build-tools 36.0.0、Gradle 9.5.1 和兼容 JDK。项目编译目标为 Java 17，最低 Android 11（API 30）。在本机 `local.properties` 配置 `sdk.dir`。
+
+```sh
+gradle :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
 ```
 
-> The Gradle wrapper JAR is not committed. Android Studio regenerates it on
-> first sync; from the CLI run `gradle wrapper` once (needs a local Gradle).
+如使用本机 Gradle wrapper，可将 `gradle` 替换为 `./gradlew`（Windows 为 `gradlew.bat`）。CI 会安装指定版本的 Gradle，不依赖本地未提交的 wrapper 启动脚本。
 
-## GitHub Actions APK builds
+测试包含握手与认证、旧 socket 回调隔离、超时/断线结果分类、事件缓冲溢出、重放顺序与边界、稳定消息 ID、进程恢复快照及配置/提案契约。真实设备弱网和真实服务端联调按 [验收清单](docs/waku-mobile-validation.md) 执行。
 
-The `.github/workflows/android-apk.yml` workflow builds a debug APK for every
-push, pull request, and manual run. The APK is uploaded as the
-`deerflow-debug-apk` workflow artifact.
+## 代码结构
 
-Pushing a tag that starts with `v`, for example `v1.0.0`, also builds a signed
-release APK and publishes it to GitHub Releases. Configure these repository
-secrets before creating a release tag:
+- `data/waku/`：协议、WebSocket 客户端、会话投影、原子缓存、恢复规则。
+- `data/ConversationRepository.kt`：连接生命周期、会话同步、用户命令与待核对状态。
+- `data/settings/`：连接配置与加密凭据。
+- `data/proposal/`：版本校验的技能治理 RPC。
+- `domain/` 与 `ui/`：展示模型、旧记录只读解析、Compose 界面。
 
-| Secret | Description |
-|---|---|
-| `ANDROID_KEYSTORE_BASE64` | Base64-encoded `.jks` or `.keystore` file |
-| `ANDROID_KEYSTORE_PASSWORD` | Keystore password |
-| `ANDROID_KEY_ALIAS` | Signing key alias |
-| `ANDROID_KEY_PASSWORD` | Signing key password |
-
-Example keystore encoding commands:
-
-```bash
-base64 -w 0 release-keystore.jks
-```
-
-```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("release-keystore.jks"))
-```
-
-## Configuration
-
-Tap the **gear icon** → set:
-
-| Field | Maps to TUI env var | Notes |
-|---|---|---|
-| Endpoint URL | `AG_UI_ENDPOINT` | Emulator → host machine uses `http://10.0.2.2:<port>/agent` |
-| Token | `AG_UI_HEADERS` | Bare token; sent as `Authorization: Bearer <token>` |
-| Initial state (JSON) | `AG_UI_INITIAL_STATE` | passed as the run's `state` |
-
-Settings persist via DataStore and apply to the next run.
-
-The **使用模型** selector loads available models from `GET /api/models` using the
-server address and Token currently entered in Settings. Choose **跟随后端默认**
-to let the backend select its default, or choose a configured model. Selections
-are saved separately for each API base URL and take effect on the next message,
-including in an existing conversation. Settings closes only after saving succeeds.
-Active runs retain their selected model across reconnects and app restarts.
-
-The DeerFlow backend must accept the top-level `modelName` field on
-`POST /api/chat/agui`. A default selection omits this field. If a saved model
-is no longer in the server's model list, select another model or the default
-before saving. Refresh errors preserve the saved choice and offer retry.
-Independent backend model assignments (such as fixed subagent models) continue
-to follow their own configuration.
-
-## Thread history
-
-Conversations are organized into threads. A navigation drawer (swipe from the
-left or tap the menu icon) lists all saved threads, lets you switch between them
-or delete them. Each thread's messages are persisted to the device filesystem
-(`threads_index.json` + per-thread files) so history survives app restarts.
-
-## File & image attachments
-
-You can select files or capture photos directly inside the app to send to the Agent. Tap the **+** (Add) icon next to the input bar to upload local documents or capture a photo using the device camera. Selected attachments are displayed as chips and can be removed before submission. When sending, the app uploads files to the thread (`POST /api/threads/{threadId}/uploads`) and injects their virtual paths into the prompt inside a `<uploaded_files_from_android>` block. In the chat history UI, these raw path blocks are cleaned up and replaced with a neat `附件：[filename]` badge.
-
-## Skill Proposal approvals
-
-When connected to this project's DeerFlow API with authentication enabled, the
-top-bar review icon opens the Proposal approval center. Pending Proposals that
-originated in the current thread also appear as interactive chat cards. You can
-inspect the diff and security scan results, add an optional review note, reject
-the Proposal, or approve and immediately publish it.
-
-The feature reuses the configured `Authorization` header and the existing
-`/api/admin/evolution/proposals` endpoints. Keep backend `auth_enabled` set to
-`true`; the Admin API is intentionally unavailable when authentication is off.
-The app refreshes Proposal state while it is in the foreground, so reviews made
-through another connected channel are reflected automatically.
-
-## Thread title synchronization
-
-The client automatically keeps thread titles in sync with the backend. Once an agent run finishes, if the thread does not have a fetched title, the app runs a background request (`GET /api/threads/{threadId}`) to fetch the server-generated thread title and updates the local history index.
-
-## Markdown rendering
-
-Assistant messages are rendered with a built-in Markdown parser supporting:
-
-- Headers (`#`, `##`, `###`)
-- Unordered and ordered lists
-- Fenced code blocks with monospace styling
-- Tables (header row + bordered cells)
-- Inline formatting: **bold**, *italic*, `code`, and `[links](https://example.com)`
-
-## Background streaming
-
-While a run is active, an `SseForegroundService` (type `dataSync`) keeps the
-process at foreground priority so SSE delivery continues when the app is
-backgrounded. The run itself lives in an app-scoped coroutine inside
-`ConversationRepository`, so it also survives screen rotation.
-
-> Android 13+ requires the `POST_NOTIFICATIONS` runtime permission (requested on
-> launch) for the foreground-service notification. Android 15 caps `dataSync`
-> foreground time per day; for very long-lived streams consider switching the
-> service type.
-
-## Architecture
-
-```
-data/agui/    AguiClient (POST+SSE), EventParser, AguiJson   ← internal/agui (Go)
-domain/model/ ChatMessage, AguiEvent, Interrupt, Roles        ← types.go
-domain/       ConversationReducer, ConversationState,         ← tui/model.go
-              ReplayFilter                                       (pure, testable)
-data/         ConversationRepository (single source of truth)
-data/settings SettingsStore (DataStore)                        ← config.go
-service/      SseForegroundService (background keep-alive)
-ui/           MainActivity, ChatScreen, BlockCard, Settings    ← TUI View layer
-```
-
-The protocol parsing and event reduction are pure Kotlin with no Android
-dependency, mirroring the Go `agui` package and `tui.model` state machine
-one-to-one — they can be unit-tested on the JVM.
-
-### AG-UI event types handled
-
-| Event | Description |
-|---|---|
-| `RUN_STARTED` / `RUN_FINISHED` / `RUN_ERROR` | Run lifecycle |
-| `TEXT_MESSAGE_START` / `TEXT_MESSAGE_CONTENT` / `TEXT_MESSAGE_END` | Streaming text |
-| `TEXT_MESSAGE_CHUNK` | Chunked text delta |
-| `REASONING` | Agent reasoning steps (collapsible) |
-| `TOOL_CALL` / `TOOL_RESULT` | Tool invocation and result |
-| `INTERRUPT` | Human-in-the-loop pause with resume prompt |
+GitHub Actions 产出 debug APK。带 `v` 前缀的 tag 按既有 workflow 和仓库 signing secrets 构建发布包。

@@ -1,17 +1,17 @@
 package com.deerflow.app.ui
 
-import android.Manifest
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
+
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -31,17 +31,9 @@ import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
 
-    private val requestNotifications =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best-effort */ }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        // Foreground-service notifications require runtime permission on Android 13+.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
 
         setContent {
             DeerflowTheme {
@@ -66,6 +58,22 @@ private fun AppRoot() {
     val chatVm: ChatViewModel = viewModel()
     val proposalVm: ProposalViewModel = viewModel()
     val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner, chatVm) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> chatVm.setForeground(true)
+                Lifecycle.Event.ON_STOP -> chatVm.setForeground(false)
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        chatVm.setForeground(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            chatVm.setForeground(false)
+        }
+    }
 
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {

@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.automirrored.filled.Rule
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -67,9 +68,15 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.deerflow.app.data.drafts.ComposerDraft
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -106,12 +113,30 @@ fun ChatScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     val proposalState by proposalVm.state.collectAsStateWithLifecycle()
     val artifactHeaders by vm.artifactHeaders.collectAsStateWithLifecycle()
+    val connection by vm.connection.collectAsStateWithLifecycle()
+    val canSend by vm.canSend.collectAsStateWithLifecycle()
+    val permissions by vm.pendingPermissions.collectAsStateWithLifecycle()
+    val questions by vm.pendingQuestions.collectAsStateWithLifecycle()
+    val unknownSubmission by vm.unknownSubmission.collectAsStateWithLifecycle()
+    val clipboard = LocalClipboardManager.current
+    val composer by vm.composer.collectAsStateWithLifecycle()
+    var reviewReset by rememberSaveable { mutableStateOf(0) }
+    val connected by vm.isConnected.collectAsStateWithLifecycle()
+    val profileKey by vm.profileKey.collectAsStateWithLifecycle()
     val scheme = MaterialTheme.colorScheme
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
-    var attachments by remember { mutableStateOf<List<PendingAttachment>>(emptyList()) }
-    var pendingCameraAttachment by remember { mutableStateOf<PendingAttachment?>(null) }
+    val draftKey = profileKey + "|" + state.threadId
+    val draft = composer.drafts[draftKey] ?: ComposerDraft()
+    val draftReady = draftKey in composer.loaded && profileKey.isNotBlank()
+    val attachments = draft.attachments.map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes) }
+    val unavailableAttachments = composer.unavailable[draftKey].orEmpty()
+    val draftError = composer.errors[draftKey]
+    var pendingCameraUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingCameraName by rememberSaveable { mutableStateOf("") }
+    var pickerDraftKey by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(draftKey) { vm.loadDraft(draftKey) }
     val threadProposals = remember(proposalState.proposals, state.threadId) {
         proposalState.proposals
             .filter { it.trigger.threadId == state.threadId }
@@ -133,15 +158,19 @@ fun ChatScreen(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris ->
         val selected = uris.mapNotNull { context.pendingAttachmentFromUri(it) }
-        if (selected.isNotEmpty()) attachments = attachments + selected
+        if (selected.size != uris.size) Toast.makeText(context, "部分附件无法访问，请重新选择", Toast.LENGTH_LONG).show()
+        if (selected.isNotEmpty()) vm.addDraftAttachments(pickerDraftKey ?: draftKey, selected)
+        pickerDraftKey = null
     }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture(),
     ) { success ->
-        val captured = pendingCameraAttachment
-        if (success && captured != null) attachments = attachments + captured
-        pendingCameraAttachment = null
+        val captured = pendingCameraUri?.let { PendingAttachment(Uri.parse(it), pendingCameraName, "image/jpeg", null) }
+        if (success && captured != null) vm.addDraftAttachments(pickerDraftKey ?: draftKey, listOf(captured))
+        pendingCameraUri = null
+        pendingCameraName = ""
+        pickerDraftKey = null
     }
 
     ModalNavigationDrawer(
@@ -268,6 +297,9 @@ fun ChatScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = vm::refresh) {
+                            Icon(Icons.Default.Refresh, contentDescription = "重新同步会话和产物")
+                        }
                         ProposalInboxButton(
                             pendingCount = proposalState.pendingCount,
                             onClick = onOpenApprovals,
@@ -284,29 +316,66 @@ fun ChatScreen(
                         .background(scheme.background)
                         .imePadding()
                 ) {
+                    if (!canSend || unknownSubmission != null) {
+                        Column(Modifier.fillMaxWidth().background(scheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp)) {
+                            Text(connection, style = MaterialTheme.typography.bodySmall)
+                            Row {
+                                TextButton(onClick = vm::refresh) { Text("重新同步") }
+                                TextButton(onClick = onOpenSettings) { Text("连接设置") }
+                            }
+                            unknownSubmission?.let { pending ->
+                                Text("这次操作的结果尚未确认。请先核对会话记录，避免重复执行。", style = MaterialTheme.typography.bodySmall)
+                                Text(pending, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                                Row {
+                                    TextButton(onClick = { clipboard.setText(AnnotatedString(pending)) }) { Text("复制原文") }
+                                    TextButton(onClick = { vm.acknowledgeUnknown(); reviewReset++ }) { Text("已核对执行结果，解除发送锁定") }
+                                }
+                            }
+                        }
+                    }
+                    PendingActions(
+                        permissions = permissions, requests = questions, enabled = connected, resetKey = reviewReset,
+                        onPermission = vm::respondPermission, onAnswers = vm::respondUserInput,
+                    )
                     StatusBar(state)
+                    if (draftError != null || unavailableAttachments.isNotEmpty()) {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+                            if (draftError != null) Text(draftError, color = scheme.error, style = MaterialTheme.typography.bodySmall)
+                            if (unavailableAttachments.isNotEmpty()) Text(
+                                "以下附件已不可访问，请移除或重新选择：" + attachments.filter { it.uri.toString() in unavailableAttachments }.joinToString { it.displayName },
+                                color = scheme.error, style = MaterialTheme.typography.bodySmall,
+                            )
+                            Row {
+                                TextButton(onClick = { vm.retryDraft(draftKey) }) { Text("重试草稿") }
+                                TextButton(onClick = { vm.clearDraft(draftKey) }) { Text("清空草稿") }
+                            }
+                        }
+                    }
                     InputBar(
                         running = state.running,
-                        awaitingInterrupt = state.awaitingInterrupt,
+                        awaitingInterrupt = false,
+                        canSend = canSend && draftReady && unavailableAttachments.isEmpty() && draftError == null && draftKey !in composer.checkingAttachments && draftKey !in composer.submitting,
+                        editable = draftReady,
+                        text = draft.text,
+                        onTextChanged = { vm.updateDraftText(draftKey, it) },
                         attachments = attachments,
                         onSubmit = { text, files ->
-                            if (state.awaitingInterrupt) {
-                                vm.submit(text)
-                            } else {
-                                vm.submit(text, files)
-                                attachments = emptyList()
-                            }
+                            val accepted = vm.submit(text, files, draftKey)
+
+                            accepted
                         },
                         onCancel = vm::cancel,
-                        onPickFiles = { filePicker.launch(arrayOf("*/*")) },
+                        onPickFiles = { pickerDraftKey = draftKey; filePicker.launch(arrayOf("*/*")) },
                         onTakePhoto = {
                             context.createCameraAttachment()?.let { pending ->
-                                pendingCameraAttachment = pending
+                                pendingCameraUri = pending.uri.toString()
+                                pendingCameraName = pending.displayName
+                                pickerDraftKey = draftKey
                                 cameraLauncher.launch(pending.uri)
                             }
                         },
                         onRemoveAttachment = { attachment ->
-                            attachments = attachments.filterNot { it.uri == attachment.uri }
+                            vm.updateDraftAttachments(draftKey, attachments.filterNot { it.uri == attachment.uri })
                         },
                     )
                 }
@@ -519,24 +588,27 @@ private fun StatusBar(state: ConversationState) {
 private fun InputBar(
     running: Boolean,
     awaitingInterrupt: Boolean,
+    canSend: Boolean,
+    editable: Boolean,
+    text: String,
+    onTextChanged: (String) -> Unit,
     attachments: List<PendingAttachment>,
-    onSubmit: (String, List<PendingAttachment>) -> Unit,
+    onSubmit: (String, List<PendingAttachment>) -> Boolean,
     onCancel: () -> Unit,
     onPickFiles: () -> Unit,
     onTakePhoto: () -> Unit,
     onRemoveAttachment: (PendingAttachment) -> Unit,
 ) {
-    var text by remember { mutableStateOf("") }
     var toolsExpanded by remember { mutableStateOf(false) }
     val placeholder = if (awaitingInterrupt) "Reply to interrupt..." else "Type a message..."
     val scheme = MaterialTheme.colorScheme
-    val canAttach = !running && !awaitingInterrupt
+    val canAttach = editable && !running && !awaitingInterrupt
     val context = LocalContext.current
 
     fun appendSpeechText(spokenText: String) {
         val trimmed = spokenText.trim()
         if (trimmed.isNotEmpty()) {
-            text = if (text.isBlank()) trimmed else "${text.trimEnd()} $trimmed"
+            onTextChanged(if (text.isBlank()) trimmed else "${text.trimEnd()} $trimmed")
         }
     }
 
@@ -578,9 +650,9 @@ private fun InputBar(
     fun send() {
         val t = text.trim()
         val hasPayload = if (awaitingInterrupt) t.isNotEmpty() else t.isNotEmpty() || attachments.isNotEmpty()
-        if (hasPayload) {
-            onSubmit(t, if (awaitingInterrupt) emptyList() else attachments)
-            text = ""
+        if (hasPayload && canSend && !running) {
+            if (!onSubmit(t, if (awaitingInterrupt) emptyList() else attachments)) return
+
             toolsExpanded = false
         }
     }
@@ -623,7 +695,8 @@ private fun InputBar(
 
             OutlinedTextField(
                 value = text,
-                onValueChange = { text = it },
+                onValueChange = onTextChanged,
+                enabled = editable,
                 modifier = Modifier.weight(1f),
                 placeholder = {
                     Text(
@@ -645,7 +718,7 @@ private fun InputBar(
                 keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { send() }),
             )
 
-            val speechEnabled = !running
+            val speechEnabled = editable && !running
             IconButton(
                 onClick = { requestSpeechInput() },
                 enabled = speechEnabled,
@@ -680,7 +753,7 @@ private fun InputBar(
                     )
                 }
             } else {
-                val sendEnabled = if (awaitingInterrupt) text.trim().isNotEmpty() else text.trim().isNotEmpty() || attachments.isNotEmpty()
+                val sendEnabled = canSend && (text.trim().isNotEmpty() || attachments.isNotEmpty())
                 IconButton(
                     onClick = { send() },
                     enabled = sendEnabled,

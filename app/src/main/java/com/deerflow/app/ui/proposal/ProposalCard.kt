@@ -44,9 +44,9 @@ fun ProposalCard(
     compact: Boolean = false,
     showViewAction: Boolean = true,
 ) {
-    var confirmation by remember(proposal.id) { mutableStateOf<ReviewDecision?>(null) }
+    var confirmation by remember(proposal.id, proposal.stateVersion) { mutableStateOf<ReviewDecision?>(null) }
     val scheme = MaterialTheme.colorScheme
-    val pending = proposal.status == "pending_review"
+    val pending = proposal.status == "pending_review" && proposal.approval == null
 
     Card(
         modifier = modifier
@@ -150,7 +150,7 @@ fun ProposalCard(
                         Text("查看变更")
                     }
                 }
-                if (pending) {
+                if (pending && !showViewAction && proposal.stateVersion > 0) {
                     Spacer(Modifier.width(4.dp))
                     OutlinedButton(
                         onClick = { confirmation = ReviewDecision.REJECT },
@@ -170,7 +170,7 @@ fun ProposalCard(
                             )
                             Spacer(Modifier.width(6.dp))
                         }
-                        Text("批准并发布")
+                        Text(if (proposal.scriptReviewRequired) "确认脚本风险并发布" else "批准并发布")
                     }
                 }
             }
@@ -185,6 +185,8 @@ fun ProposalCard(
             text = {
                 Text(
                     when {
+                        approving && proposal.scriptReviewRequired ->
+                            "此提案包含需人工审查的脚本。请核对完整变更；确认表示接受这些脚本的风险并提交发布。静态检查不代表已真实执行或隔离验证。"
                         approving && proposal.risk == "high" ->
                             "这是高风险 Proposal。批准后会立即发布并修改当前 Skill。"
                         approving -> "批准后会立即发布并修改当前 Skill。"
@@ -199,7 +201,7 @@ fun ProposalCard(
                         if (approving) onApprove() else onReject()
                     },
                 ) {
-                    Text(if (approving) "批准并发布" else "拒绝")
+                    Text(if (approving && proposal.scriptReviewRequired) "确认脚本风险并发布" else if (approving) "批准并发布" else "拒绝")
                 }
             },
             dismissButton = {

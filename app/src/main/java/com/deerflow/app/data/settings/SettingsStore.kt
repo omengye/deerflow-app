@@ -1,114 +1,132 @@
 package com.deerflow.app.data.settings
 
 import android.content.Context
-import androidx.datastore.core.DataStore
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
+import androidx.datastore.core.DataMigration
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.deerflow.app.data.agui.AguiJson
-import com.deerflow.app.data.models.resolveApiBaseUrl
-import kotlinx.serialization.builtins.MapSerializer
-import kotlinx.serialization.builtins.serializer
+import java.net.URI
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonObject
 
-private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "deerflow_settings")
+private val Context.dataStore by preferencesDataStore(
+    name = "deerflow_settings",
+    produceMigrations = { listOf(object : DataMigration<Preferences> {
+        private val legacyKeys = listOf("token", "headers", "initial_state", "model_selections").map(::stringPreferencesKey)
+        override suspend fun shouldMigrate(currentData: Preferences): Boolean = legacyKeys.any { currentData[it] != null }
+        override suspend fun migrate(currentData: Preferences): Preferences = currentData.toMutablePreferences().apply {
+            legacyKeys.forEach { remove(it) }
+        }
+        override suspend fun cleanUp() = Unit
+    }) },
+)
 
-/** User-configurable connection settings. Port of internal/config/config.go. */
 data class AppSettings(
     val endpoint: String = DEFAULT_ENDPOINT,
     val token: String = "",
-    val initialStateJson: String = "",
-    val modelSelections: Map<String, String> = emptyMap(),
+    val workspace: String = "/workspaces",
+    val modelName: String? = null,
+    val needsReconfiguration: Boolean = false,
 ) {
-    val modelName: String?
-        get() = runCatching { modelSelections[resolveApiBaseUrl(endpoint).toString()] }
-            .getOrNull()?.takeIf { it.isNotBlank() }
-
-    fun withModel(name: String?): AppSettings {
-        val key = resolveApiBaseUrl(endpoint).toString()
-        val choices = modelSelections.toMutableMap()
-        if (name.isNullOrBlank()) choices.remove(key) else choices[key] = name
-        return copy(modelSelections = choices)
-    }
-
-    /**
-     * Build the Authorization header map from [token].
-     *
-     * If [token] is blank, returns an empty map (no auth header sent). Otherwise
-     * the token is sent as `Authorization: Bearer <token>`.
-     */
-    fun headers(): Map<String, String> {
-        val trimmed = token.trim()
-        return if (trimmed.isEmpty()) emptyMap()
-        else mapOf("Authorization" to "Bearer $trimmed")
-    }
-
-    /** Parse [initialStateJson] into a JSON object, ignoring malformed input. */
-    fun initialState(): JsonObject {
-        if (initialStateJson.isBlank()) return JsonObject(emptyMap())
-        return runCatching { AguiJson.parseToJsonElement(initialStateJson).jsonObject }
-            .getOrDefault(JsonObject(emptyMap()))
-    }
+    val validationError: String?
+        get() {
+            val uri = runCatching { URI(endpoint.trim()) }.getOrNull()
+            if (uri == null || uri.scheme !in setOf("ws", "wss") || uri.host.isNullOrBlank() ||
+                uri.userInfo != null || uri.fragment != null || uri.rawQuery != null || uri.path != "/v1") {
+                return "请输入完整的 Waku 地址，例如 ws://10.0.2.2:18787/v1"
+            }
+            if (token.isBlank()) return "请输入服务器提供的连接 Token"
+            if (workspace.isBlank()) return "请输入服务器工作目录"
+            return null
+        }
+    val isConfigured: Boolean get() = !needsReconfiguration && validationError == null
+    val connectionKey: String get() = endpoint.trim().removeSuffix("/") + "|" + workspace.trim()
 
     companion object {
-        const val DEFAULT_ENDPOINT = "http://10.0.2.2:8000" // host loopback from emulator
+        const val DEFAULT_ENDPOINT = "ws://10.0.2.2:18787/v1"
     }
 }
 
+/** Token plaintext exists only in memory; preferences contain an Android Keystore encrypted value. */
 class SettingsStore(private val context: Context) {
     private val endpointKey = stringPreferencesKey("endpoint")
-    private val tokenKey = stringPreferencesKey("token")
-    private val legacyHeadersKey = stringPreferencesKey("headers")
-    private val initialStateKey = stringPreferencesKey("initial_state")
-    private val modelSelectionsKey = stringPreferencesKey("model_selections")
-    private val modelSelectionsSerializer = MapSerializer(String.serializer(), String.serializer())
+    private val tokenCipherKey = stringPreferencesKey("waku_token_encrypted_v1")
+    private val workspaceKey = stringPreferencesKey("waku_workspace")
+    private val modelKey = stringPreferencesKey("waku_model")
+    private val configuredKey = stringPreferencesKey("waku_configured")
+    private val oldTokenKey = stringPreferencesKey("token")
+    private val oldHeadersKey = stringPreferencesKey("headers")
+    private val oldStateKey = stringPreferencesKey("initial_state")
+    private val oldModelsKey = stringPreferencesKey("model_selections")
 
     val flow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
+        val endpoint = prefs[endpointKey] ?: AppSettings.DEFAULT_ENDPOINT
+        val cipher = prefs[tokenCipherKey].orEmpty()
+        val decrypted = runCatching { if (cipher.isBlank()) "" else TokenCipher.decrypt(cipher) }
         AppSettings(
-            endpoint = prefs[endpointKey]?.takeIf { it.isNotBlank() } ?: AppSettings.DEFAULT_ENDPOINT,
-            token = prefs[tokenKey]?.takeIf { it.isNotBlank() }
-                ?: prefs[legacyHeadersKey]?.let { extractTokenFromLegacyHeaders(it) }.orEmpty(),
-            initialStateJson = prefs[initialStateKey].orEmpty(),
-            modelSelections = runCatching {
-                AguiJson.decodeFromString(modelSelectionsSerializer, prefs[modelSelectionsKey] ?: "{}")
-            }.getOrDefault(emptyMap()),
+            endpoint = endpoint,
+            token = decrypted.getOrDefault(""),
+            workspace = prefs[workspaceKey] ?: "/workspaces",
+            modelName = prefs[modelKey]?.takeIf(String::isNotBlank),
+            needsReconfiguration = (prefs[endpointKey] != null && prefs[configuredKey] != "true") || decrypted.isFailure,
         )
     }
 
     suspend fun current(): AppSettings = flow.first()
 
     suspend fun save(settings: AppSettings) {
+        require(settings.validationError == null) { settings.validationError.orEmpty() }
+        // Encrypt before editing: key errors must not commit a partially updated connection.
+        val encrypted = settings.token.trim().takeIf(String::isNotBlank)?.let(TokenCipher::encrypt)
         context.dataStore.edit { prefs ->
             prefs[endpointKey] = settings.endpoint.trim()
-            prefs[tokenKey] = settings.token.trim()
-            prefs[initialStateKey] = settings.initialStateJson.trim()
-            prefs[modelSelectionsKey] = AguiJson.encodeToString(modelSelectionsSerializer, settings.modelSelections)
-            prefs.remove(legacyHeadersKey)
+            prefs[workspaceKey] = settings.workspace.trim()
+            prefs[configuredKey] = "true"
+            if (encrypted == null) prefs.remove(tokenCipherKey) else prefs[tokenCipherKey] = encrypted
+            settings.modelName?.trim()?.takeIf(String::isNotBlank)?.let { prefs[modelKey] = it }
+                ?: prefs.remove(modelKey)
+            prefs.remove(oldTokenKey)
+            prefs.remove(oldHeadersKey)
+            prefs.remove(oldStateKey)
+            prefs.remove(oldModelsKey)
         }
     }
+}
 
-    /**
-     * Extract a bare token from a legacy headers JSON string.
-     *
-     * Handles both `{"Authorization":"Bearer xxx"}` and `{"Authorization":"xxx"}`;
-     * returns null when there is no Authorization entry or the JSON is malformed.
-     */
-    private fun extractTokenFromLegacyHeaders(json: String): String? {
-        if (json.isBlank()) return null
-        return runCatching {
-            val auth = (AguiJson.parseToJsonElement(json).jsonObject["Authorization"]
-                as? JsonPrimitive)?.content ?: return null
-            when {
-                auth.startsWith("Bearer ", ignoreCase = true) -> auth.substring(7).trim()
-                auth.isNotBlank() -> auth.trim()
-                else -> null
-            }
-        }.getOrNull()
+private object TokenCipher {
+    private const val ALIAS = "deerflow.waku.token.v1"
+    private fun key(create: Boolean): SecretKey {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(ALIAS, null) as? SecretKey)?.let { return it }
+        check(create) { "Token key is unavailable; enter the token again" }
+        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+            init(KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setRandomizedEncryptionRequired(true).build())
+        }.generateKey()
+    }
+    @Synchronized fun encrypt(value: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, key(true))
+        return Base64.encodeToString(cipher.iv, Base64.NO_WRAP) + ":" +
+            Base64.encodeToString(cipher.doFinal(value.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
+    }
+    @Synchronized fun decrypt(value: String): String {
+        val parts = value.split(':', limit = 2)
+        require(parts.size == 2)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key(false), GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)))
+        return cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)).toString(Charsets.UTF_8)
     }
 }

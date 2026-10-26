@@ -665,103 +665,108 @@ private suspend fun downloadArtifact(
     headers: Map<String, String>,
 ): Uri = downloadUrl(context, artifact.url, artifact.name, headers)
 
-private suspend fun downloadUrl(
-    context: Context,
-    url: String,
-    name: String,
-    headers: Map<String, String>,
-): Uri = withContext(Dispatchers.IO) {
-    val dir = File(context.cacheDir, "artifacts").apply { mkdirs() }
-    val file = File(dir, sanitizeArtifactFilename(name))
-    val connection = URL(url).openConnection()
-    headers.forEach { (key, value) ->
-        if (key.isNotBlank()) connection.setRequestProperty(key, value)
-    }
-    if (connection is HttpURLConnection) {
-        connection.connectTimeout = 15_000
-        connection.readTimeout = 60_000
-        if (connection.responseCode !in 200..299) {
-            throw IllegalStateException("HTTP ${connection.responseCode}")
+private data class ArtifactSource(
+    val input: java.io.InputStream,
+    val length: Long? = null,
+    val disconnect: () -> Unit = {},
+) : java.io.Closeable {
+    override fun close() { try { input.close() } finally { disconnect() } }
+}
+
+private fun checkedCacheFile(context: Context, uri: Uri): File {
+    val file = File(requireNotNull(uri.path)).canonicalFile
+    val root = context.cacheDir.canonicalFile
+    require(file.path.startsWith(root.path + File.separator) && file.isFile) { "本地附件不可用，请重新同步" }
+    return file
+}
+
+/** No gateway credentials are ever forwarded to artifact or Markdown URLs. */
+private fun openArtifactSource(context: Context, url: String): ArtifactSource {
+    val uri = Uri.parse(url)
+    return when (uri.scheme?.lowercase()) {
+        "file" -> checkedCacheFile(context, uri).let { ArtifactSource(it.inputStream(), it.length()) }
+        "content" -> {
+            require(uri.authority == "${context.packageName}.fileprovider") { "不支持此外部文件来源" }
+            ArtifactSource(context.contentResolver.openInputStream(uri) ?: error("本地附件不可用"))
         }
+        "http", "https" -> {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.connectTimeout = 15_000
+            connection.readTimeout = 60_000
+            try {
+                check(connection.responseCode in 200..299) { "HTTP ${connection.responseCode}" }
+                ArtifactSource(connection.inputStream, connection.contentLengthLong.takeIf { it > 0 }, connection::disconnect)
+            } catch (error: Throwable) { connection.disconnect(); throw error }
+        }
+        else -> error("附件尚未下载，请重新同步")
     }
-    connection.getInputStream().use { input ->
-        file.outputStream().use { output -> input.copyTo(output) }
+}
+
+private suspend fun downloadUrl(
+    context: Context, url: String, name: String, headers: Map<String, String>,
+): Uri = withContext(Dispatchers.IO) {
+    val uri = Uri.parse(url)
+    if (uri.scheme == "file") {
+        return@withContext FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", checkedCacheFile(context, uri))
     }
+    if (uri.scheme == "content" && uri.authority == "${context.packageName}.fileprovider") return@withContext uri
+    val dir = File(context.cacheDir, "artifacts").apply { mkdirs() }
+    val file = File(dir, "${java.util.UUID.randomUUID()}-${sanitizeArtifactFilename(name)}")
+    try {
+        openArtifactSource(context, url).use { source ->
+            file.outputStream().use { output -> source.input.copyTo(output) }
+        }
+    } catch (error: Throwable) { file.delete(); throw error }
     FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }
 
 private suspend fun saveToDownloads(
-    context: Context,
-    displayName: String,
-    mime: String?,
-    url: String,
-    authHeaders: Map<String, String>,
-    onProgress: (Float) -> Unit,
+    context: Context, displayName: String, mime: String?, url: String,
+    authHeaders: Map<String, String>, onProgress: (Float) -> Unit,
 ): Uri = withContext(Dispatchers.IO) {
     val safeName = sanitizeArtifactFilename(displayName.ifBlank { "artifact" })
-    val finalMime = mime?.ifBlank { null } ?: guessMime(safeName)
-
-    val conn = URL(url).openConnection() as HttpURLConnection
-    authHeaders.forEach { (key, value) ->
-        if (key.isNotBlank()) conn.setRequestProperty(key, value)
-    }
-    conn.connectTimeout = 15_000
-    conn.readTimeout = 60_000
-    if (conn.responseCode !in 200..299) {
-        conn.disconnect()
-        throw IllegalStateException("HTTP ${conn.responseCode}")
-    }
-    val total = conn.contentLengthLong.takeIf { it > 0 }
-
-    try {
+    openArtifactSource(context, url).use { source ->
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, safeName)
-            put(MediaStore.Downloads.MIME_TYPE, finalMime)
+            put(MediaStore.Downloads.MIME_TYPE, mime?.ifBlank { null } ?: guessMime(safeName))
             put(MediaStore.Downloads.RELATIVE_PATH, "Download/deerflow/")
             put(MediaStore.Downloads.IS_PENDING, 1)
         }
-        val uri = context.contentResolver
-            .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-            ?: throw IllegalStateException("MediaStore insert failed")
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: error("无法创建下载文件")
         var written = false
         try {
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                conn.inputStream.use { input ->
-                    val buf = ByteArray(64 * 1024)
-                    var read = 0L
-                    var lastEmit = 0L
-                    while (true) {
-                        val n = input.read(buf)
-                        if (n <= 0) break
-                        out.write(buf, 0, n)
-                        read += n
-                        if (total != null) {
-                            val now = SystemClock.elapsedRealtime()
-                            if (now - lastEmit > 100L || read >= total) {
-                                onProgress((read.toFloat() / total).coerceIn(0f, 1f))
-                                lastEmit = now
-                            }
+            context.contentResolver.openOutputStream(uri)?.use { output ->
+                val buffer = ByteArray(64 * 1024)
+                var read = 0L
+                var lastEmit = 0L
+                while (true) {
+                    val count = source.input.read(buffer)
+                    if (count < 0) break
+                    output.write(buffer, 0, count)
+                    read += count
+                    val total = source.length
+                    if (total != null && total > 0) {
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastEmit > 100 || read >= total) {
+                            onProgress((read.toFloat() / total).coerceIn(0f, 1f))
+                            lastEmit = now
                         }
                     }
-                    written = true
                 }
+                written = true
             }
         } finally {
             if (written) {
                 values.clear()
                 values.put(MediaStore.Downloads.IS_PENDING, 0)
                 context.contentResolver.update(uri, values, null, null)
-            } else {
-                context.contentResolver.delete(uri, null, null)
-            }
+            } else context.contentResolver.delete(uri, null, null)
         }
-        if (!written) throw IllegalStateException("Failed to write to MediaStore")
+        check(written) { "保存文件失败" }
         uri
-    } finally {
-        conn.disconnect()
     }
 }
-
 private fun guessMime(name: String): String =
     MimeTypeMap.getSingleton()
         .getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(name))
@@ -826,21 +831,16 @@ private fun ImageLoadState(message: String, modifier: Modifier = Modifier) {
     }
 }
 
-private fun authenticatedImageRequest(
-    context: Context,
-    url: String,
-    headers: Map<String, String>,
-): ImageRequest {
-    return ImageRequest.Builder(context)
-        .data(url)
-        .apply {
-            headers.forEach { (key, value) ->
-                if (key.isNotBlank()) setHeader(key, value)
-            }
-        }
-        .build()
+private fun authenticatedImageRequest(context: Context, url: String, headers: Map<String, String>): ImageRequest {
+    val uri = Uri.parse(url)
+    val safeData: Any? = when (uri.scheme?.lowercase()) {
+        "file" -> runCatching { checkedCacheFile(context, uri) }.getOrNull()
+        "content" -> uri.takeIf { it.authority == "${context.packageName}.fileprovider" }
+        "http", "https" -> url
+        else -> null
+    }
+    return ImageRequest.Builder(context).data(safeData).build()
 }
-
 private fun sanitizeArtifactFilename(name: String): String {
     val clean = name.substringAfterLast('/').substringAfterLast('\\').trim()
         .replace(Regex("[^A-Za-z0-9._-]"), "_")

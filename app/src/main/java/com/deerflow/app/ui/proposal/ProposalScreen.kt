@@ -198,7 +198,7 @@ private fun ProposalDetail(
         item {
             ProposalCard(
                 proposal = proposal,
-                busy = busy,
+                busy = busy || loading,
                 onView = {},
                 onApprove = { onApprove(proposal.id, note) },
                 onReject = { onReject(proposal.id, note) },
@@ -231,7 +231,7 @@ private fun ProposalDetail(
                 onValueChange = { note = it.take(2000) },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("审批意见（可选）") },
-                enabled = proposal.status == "pending_review" && !busy,
+                enabled = proposal.status == "pending_review" && proposal.approval == null && !busy,
                 minLines = 2,
                 maxLines = 5,
             )

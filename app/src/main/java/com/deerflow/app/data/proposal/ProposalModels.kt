@@ -52,6 +52,10 @@ data class SkillProposal(
     @SerialName("archived_by")
     val archivedBy: String? = null,
     val diff: String? = null,
+    @SerialName("state_version") val stateVersion: Long = 0,
+    @SerialName("script_review_required") val scriptReviewRequired: Boolean = false,
+    val approval: JsonObject? = null,
+    val publication: JsonObject? = null,
 )
 
 @Serializable

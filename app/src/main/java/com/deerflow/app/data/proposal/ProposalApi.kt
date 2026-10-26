@@ -1,115 +1,92 @@
 package com.deerflow.app.data.proposal
 
-import com.deerflow.app.data.agui.AguiJson
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import com.deerflow.app.data.settings.AppSettings
+import com.deerflow.app.data.waku.WakuClient
+import kotlinx.serialization.json.Json
+import com.deerflow.app.data.waku.wakuCommand
 import java.io.IOException
-import java.util.concurrent.TimeUnit
+import java.util.UUID
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.put
 
-class ProposalApiException(
-    val statusCode: Int,
-    responseSnippet: String,
-) : IOException("Proposal request failed: status=$statusCode $responseSnippet")
+internal val ProposalJson = Json { ignoreUnknownKeys = true; coerceInputValues = true }
 
-/** HTTP client for the existing single-user Admin Proposal API. */
-class ProposalApi(
-    endpoint: String,
-    private val headers: Map<String, String>,
-    private val http: OkHttpClient = defaultHttp,
-) {
-    private val proposalsUrl = resolveProposalBaseUrl(endpoint)
+class ProposalApiException(val code: String, message: String) : IOException(message)
 
-    suspend fun listProposals(): List<SkillProposal> {
-        val request = requestBuilder(proposalsUrl).get().build()
-        val body = execute(request)
-        return AguiJson.decodeFromString(ProposalListResponse.serializer(), body).proposals
+/** Skill governance uses the same authenticated Waku gateway as chat. */
+class ProposalApi(private val settings: AppSettings) {
+    suspend fun listProposals(): List<SkillProposal> = withClient { client ->
+        val proposals = mutableListOf<SkillProposal>()
+        val seenCursors = mutableSetOf<String>()
+        var cursor: String? = null
+        do {
+            val page = manage(client, buildJsonObject {
+                put("operation", "proposal.list")
+                put("limit", 100)
+                cursor?.let { put("cursor", it) }
+            })
+            proposals += ProposalJson.decodeFromJsonElement<ProposalListResponse>(page).proposals
+            cursor = (page["next_cursor"] as? JsonPrimitive)?.contentOrNull?.takeIf(String::isNotBlank)
+            check(cursor == null || (seenCursors.add(cursor!!) && seenCursors.size < 100)) { "提案列表分页无效，请刷新" }
+        } while (cursor != null)
+        proposals.distinctBy { it.id }
     }
 
-    suspend fun getProposal(proposalId: String): SkillProposal {
-        val request = requestBuilder(proposalUrl(proposalId)).get().build()
-        return AguiJson.decodeFromString(SkillProposal.serializer(), execute(request))
+    suspend fun getProposal(proposalId: String): SkillProposal = withClient { client ->
+        ProposalJson.decodeFromJsonElement(manage(client, buildJsonObject {
+            put("operation", "proposal.get")
+            put("proposal_id", proposalId)
+        }))
+    }
+    suspend fun approve(proposal: SkillProposal, note: String?): SkillProposal = review(proposal, "approve", note)
+    suspend fun reject(proposal: SkillProposal, note: String?): SkillProposal = review(proposal, "reject", note)
+
+    private suspend fun review(proposal: SkillProposal, decision: String, note: String?): SkillProposal = withClient { client ->
+        require(proposal.stateVersion > 0) { "请刷新提案详情后再操作" }
+        require(proposal.approval == null) { "批准已保存，请刷新确认发布结果" }
+        val data = manage(client, proposalReviewCommand(proposal, decision, note))
+        ProposalJson.decodeFromJsonElement<SkillProposal>(data["proposal"] ?: error("服务器没有返回提案状态"))
     }
 
-    suspend fun approve(proposal: SkillProposal, note: String?): SkillProposal =
-        review(proposal, "approve", note)
-
-    suspend fun reject(proposal: SkillProposal, note: String?): SkillProposal =
-        review(proposal, "reject", note)
-
-    private suspend fun review(proposal: SkillProposal, decision: String, note: String?): SkillProposal {
-        val payload = ProposalReviewRequest(
-            expectedBaseSha256 = proposal.baseSha256,
-            note = note?.trim()?.takeIf { it.isNotEmpty() },
-        )
-        val body = AguiJson.encodeToString(ProposalReviewRequest.serializer(), payload)
-            .toRequestBody(JSON_MEDIA_TYPE)
-        val url = proposalUrl(proposal.id).newBuilder().addPathSegment(decision).build()
-        val request = requestBuilder(url).post(body).build()
-        return AguiJson.decodeFromString(
-            ProposalReviewResponse.serializer(),
-            execute(request),
-        ).proposal
-    }
-
-    private fun proposalUrl(proposalId: String): HttpUrl =
-        proposalsUrl.newBuilder().addPathSegment(proposalId).build()
-
-    private fun requestBuilder(url: HttpUrl): Request.Builder =
-        Request.Builder()
-            .url(url)
-            .header("Accept", "application/json")
-            .apply { headers.forEach { (name, value) -> header(name, value) } }
-
-    private suspend fun execute(request: Request): String = withContext(Dispatchers.IO) {
-        http.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                throw ProposalApiException(response.code, body.take(MAX_ERROR_CHARS))
-            }
-            body
+    private suspend fun manage(client: WakuClient, input: JsonObject): JsonObject {
+        val response = client.request(wakuCommand("deerFlow") {
+            put("operation", "manage-envelope")
+            put("input", input)
+        })
+        val envelope = response["data"] as? JsonObject ?: error("无效的管理响应")
+        if ((envelope["ok"] as? JsonPrimitive)?.booleanOrNull != true) {
+            val code = (envelope["code"] as? JsonPrimitive)?.contentOrNull ?: "management_error"
+            throw ProposalApiException(code, (envelope["error"] as? JsonPrimitive)?.contentOrNull ?: "管理操作未完成")
         }
+        return envelope["data"] as? JsonObject ?: error("无效的提案响应")
     }
 
-    companion object {
-        private val JSON_MEDIA_TYPE = "application/json".toMediaType()
-        private const val MAX_ERROR_CHARS = 500
-        private val defaultHttp: OkHttpClient by lazy {
-            OkHttpClient.Builder()
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .writeTimeout(30, TimeUnit.SECONDS)
-                .build()
+    private suspend fun <T> withClient(block: suspend (WakuClient) -> T): T {
+        require(settings.isConfigured) { "请先配置 Waku 服务连接" }
+        val client = WakuClient(settings.endpoint, settings.token, UUID.randomUUID().toString())
+        return coroutineScope {
+            val drain = launch { for (ignored in client.incoming) { /* management does not project chat events */ } }
+            try { client.connect(); block(client) }
+            finally { client.close(); drain.cancel() }
         }
     }
 }
 
-internal fun resolveProposalBaseUrl(endpoint: String): HttpUrl {
-    val parsed = endpoint.trim().toHttpUrlOrNull()
-        ?: throw IllegalArgumentException("Invalid DeerFlow endpoint URL")
-    val segments = parsed.pathSegments.filter { it.isNotEmpty() }
-    val apiIndex = segments.indexOf("api")
-    val prefixSegments = when {
-        apiIndex >= 0 -> segments.subList(0, apiIndex + 1)
-        segments.contains("agent") -> listOf("api")
-        else -> segments + "api"
-    }
-
-    return parsed.newBuilder()
-        .encodedPath("/")
-        .query(null)
-        .fragment(null)
-        .apply {
-            prefixSegments.forEach(::addPathSegment)
-            addPathSegment("admin")
-            addPathSegment("evolution")
-            addPathSegment("proposals")
-        }
-        .build()
+internal fun proposalReviewCommand(proposal: SkillProposal, decision: String, note: String?): JsonObject = buildJsonObject {
+    require(decision == "approve" || decision == "reject")
+    require(proposal.stateVersion > 0)
+    put("operation", "proposal.$decision")
+    put("proposal_id", proposal.id)
+    put("expected_state_version", proposal.stateVersion)
+    put("expected_base_sha256", proposal.baseSha256?.let(::JsonPrimitive) ?: JsonNull)
+    note?.trim()?.takeIf(String::isNotBlank)?.let { put("note", it) }
+    if (decision == "approve" && proposal.scriptReviewRequired) put("acknowledge_unverified_scripts", true)
 }
-
