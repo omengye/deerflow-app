@@ -38,6 +38,37 @@ class WakuProjectionTest {
         assertFalse(cursor.containsKey("runtimeId"))
     }
 
+    @Test fun firstAcceptedPromptCreatesAPersistedTitleWithoutAnotherProviderEvent() {
+        val state = reduce(initial, 1, "promptSubmitted", prompt("turn", "message", "排查 Android 会话标题显示异常"))
+        assertEquals("排查 Android 会话标题显示异常", state.session["auto_title"]!!.jsonPrimitive.content)
+        assertEquals("New task", state.session["title"]!!.jsonPrimitive.content)
+        assertEquals(state.session["auto_title"], WakuProjection.fromSession(state.session).session["auto_title"])
+    }
+
+    @Test fun historicalUnnamedSessionRecoversTitleFromFirstUserMessage() {
+        val session = initial.session.updated("messages" to buildJsonArray {
+            add(buildJsonObject { put("role", "system"); put("content", "System instructions") })
+            add(buildJsonObject { put("role", "user"); put("content", "修复历史会话标题") })
+            add(buildJsonObject { put("role", "user"); put("content", "第二条消息不能改标题") })
+        })
+        val restored = WakuProjection.fromSession(session)
+        assertEquals("修复历史会话标题", restored.session["auto_title"]!!.jsonPrimitive.content)
+        assertEquals(session["messages"], restored.session["messages"])
+        assertEquals(session["updated_at"], restored.session["updated_at"])
+    }
+
+    @Test fun laterPromptsKeepInitialTitleAndProviderUpdatesRespectExplicitNames() {
+        val first = reduce(initial, 1, "promptSubmitted", prompt("turn", "message", "首条消息"))
+        val second = reduce(first, 2, "promptSubmitted", prompt("turn-2", "message-2", "第二条消息"))
+        assertEquals("首条消息", WakuSessionTitles.display(second.session))
+        val generated = reduce(second, 3, "autoTitleUpdated", JsonPrimitive("服务端生成标题"))
+        assertEquals("服务端生成标题", WakuSessionTitles.display(generated.session))
+        val renamed = generated.copy(session = generated.session.updated("title" to JsonPrimitive("手动标题")))
+        val updated = reduce(renamed, 4, "autoTitleUpdated", JsonPrimitive("新的自动标题"))
+        assertEquals("手动标题", WakuSessionTitles.display(updated.session))
+        assertEquals(updated, reduce(updated, 3, "autoTitleUpdated", JsonPrimitive("过期事件")))
+    }
+
     @Test fun backendApprovalEventsOverrideRememberedModeWithoutDismissingPermissionCards() {
         val ask = reduce(initial, 1, "toolApprovalChanged", JsonPrimitive("ask"))
         assertEquals("ask", ask.session["runtime_mode"]!!.jsonPrimitive.content)

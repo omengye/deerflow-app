@@ -94,6 +94,9 @@ class ConversationRepository(
         val ended = CompletableDeferred<Throwable>()
         val runtimes = mutableMapOf<String, Runtime>()
         val checkpoint = Channel<Unit>(Channel.CONFLATED)
+        val titleRefresh = Channel<Unit>(Channel.CONFLATED)
+        val titleChecked = mutableMapOf<String, JsonObject>()
+        val catalogRefresh = Mutex()
         val artifactLoading = mutableSetOf<String>()
         lateinit var artifacts: WakuTaskArtifacts
         lateinit var toolApproval: WakuToolApproval
@@ -267,6 +270,13 @@ class ConversationRepository(
         val localWriter = launch {
             while (isActive) { delay(250); mutex.withLock { ensureCurrent(link); flushLocal(link.profile) } }
         }
+        val titleReader = launch {
+            for (signal in link.titleRefresh) {
+                try { refreshTitles(link) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Optional metadata can retry on the next catalog refresh. */ }
+            }
+        }
         val serverWriter = launch {
             while (isActive) {
                 withTimeoutOrNull(2_000) { link.checkpoint.receive() }
@@ -286,11 +296,11 @@ class ConversationRepository(
             setConnection(link.profile, "已连接", true)
             link.ended.await()
         } finally {
-            receive.cancel(); watch.cancel(); localWriter.cancel(); serverWriter.cancel()
+            receive.cancel(); watch.cancel(); localWriter.cancel(); serverWriter.cancel(); titleReader.cancel()
         }
     }
 
-    private suspend fun loadCatalog(link: Link) {
+    private suspend fun loadCatalog(link: Link) = link.catalogRefresh.withLock {
         val result = link.client.request(wakuCommand("loadTaskState"))
         require(result.s("type") == "taskState") { "服务器返回的会话列表无效" }
         mutex.withLock {
@@ -300,7 +310,12 @@ class ConversationRepository(
             p.catalog.clear()
             p.catalog.putAll(result.objs("sessions").filter { it.s("provider") == "deerFlow" }.associateBy { it.s("id").orEmpty() })
             p.remoteIds.clear(); p.remoteIds += p.catalog.keys
-            // These rows intentionally contain empty history. Never hydrate a conversation from them.
+            // Only copy title metadata: catalog rows deliberately contain empty transcripts/cursors.
+            for ((id, summary) in p.catalog) {
+                val snapshot = p.snapshots[id] ?: continue
+                val merged = WakuSessionTitles.mergeMetadata(snapshot.session, summary)
+                if (merged != snapshot.session) putSnapshot(p, id, snapshot.copy(session = merged), false)
+            }
             for (id in p.remoteIds) p.drafts.remove(id)
             for (id in p.snapshots.keys - p.remoteIds) {
                 val snapshot = p.snapshots[id] ?: continue
@@ -311,6 +326,38 @@ class ConversationRepository(
                 else p.blocked[id] = "本地历史尚未在服务器中找到对应会话，请核对服务器配置。"
             }
             publish(p)
+        }
+        link.titleRefresh.trySend(Unit)
+    }
+
+    /** Read missing title history without attaching a runtime or submitting provider work. */
+    private suspend fun refreshTitles(link: Link) {
+        while (currentCoroutineContext().isActive) {
+            val candidate = mutex.withLock {
+                ensureCurrent(link)
+                val p = link.profile
+                p.catalog.entries.firstOrNull { (id, summary) ->
+                    link.titleChecked[id] != summary &&
+                        WakuSessionTitles.needsDetails(p.snapshots[id]?.session, summary)
+                }?.let { it.key to it.value }
+            } ?: return
+            val (id, summary) = candidate
+            val response = link.client.request(wakuCommand("hydrateSession") { put("sessionId", id) })
+            val remote = response["session"] as? JsonObject
+            mutex.withLock {
+                ensureCurrent(link)
+                val p = link.profile
+                if (p.catalog[id] == summary) {
+                    link.titleChecked[id] = summary
+                    if (remote?.s("id") == id) {
+                        val current = p.snapshots[id]
+                        val next = if (current == null) WakuProjection.fromSession(remote).copy(remoteKnown = true)
+                            else current.copy(session = WakuSessionTitles.mergeMetadata(current.session, remote, fullSnapshot = true))
+                        if (next != current) putSnapshot(p, id, next, false)
+                        publish(p)
+                    }
+                }
+            }
         }
     }
 
@@ -937,7 +984,7 @@ class ConversationRepository(
         val rows = p.catalog.toMutableMap().apply { p.snapshots.forEach { (id, snapshot) -> put(id, snapshot.session) } }
         _threads.value = rows.values.filter { it.s("provider") == "deerFlow" }.mapNotNull { session ->
             val id = session.s("id") ?: return@mapNotNull null
-            ThreadMeta(id, session.s("auto_title")?.takeIf { session.s("title") == "New task" } ?: session.s("title") ?: "New task", session.n("updated_at") * 1000, true)
+            ThreadMeta(id, WakuSessionTitles.display(session), session.n("updated_at") * 1000, true)
         }.sortedByDescending { it.lastActive } + legacyIndex
         _runningThreadIds.value = rows.filterValues { it.s("status") in BUSY }.keys
         val running = rows.values.filter { it.s("provider") == "deerFlow" && it.s("status") in BUSY }

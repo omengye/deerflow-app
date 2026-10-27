@@ -111,6 +111,8 @@ fun ChatScreen(
     onOpenSettings: () -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val threads by vm.threads.collectAsStateWithLifecycle()
+    val sessionTitle = threads.firstOrNull { it.id == state.threadId }?.title ?: "DeerFlow"
     val proposalState by proposalVm.state.collectAsStateWithLifecycle()
     val artifactHeaders by vm.artifactHeaders.collectAsStateWithLifecycle()
     val connection by vm.connection.collectAsStateWithLifecycle()
@@ -216,7 +218,6 @@ fun ChatScreen(
                     HorizontalDivider(color = scheme.outline.copy(alpha = 0.2f))
                     Spacer(Modifier.height(8.dp))
 
-                    val threads by vm.threads.collectAsStateWithLifecycle()
                     val runningThreadIds by vm.runningThreadIds.collectAsStateWithLifecycle()
                     LazyColumn(
                         modifier = Modifier.weight(1f),
@@ -282,9 +283,11 @@ fun ChatScreen(
                 TopAppBar(
                     title = {
                         Text(
-                            "DeerFlow",
+                            sessionTitle,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.titleLarge
+                            style = MaterialTheme.typography.titleMedium
                         )
                     },
                     colors = TopAppBarDefaults.topAppBarColors(

@@ -18,7 +18,7 @@ object WakuRecovery {
         val sameStream = serverCursor != null && localCursor != null &&
             serverCursor["epoch"] == localCursor["epoch"] &&
             serverCursor["runtime_id"] == localCursor["runtime_id"]
-        val localAhead = sameStream && localCursor!!.long("sequence") > serverCursor!!.long("sequence")
+        val localAhead = localStreamAhead(local.session, remote)
         // Only a strictly newer cursor on the same stream can beat a server snapshot.
         // Explicit task metadata can change independently of the runtime journal.
         if (localAhead) return local.copy(session = JsonObject(local.session.toMutableMap().apply {
@@ -30,6 +30,13 @@ object WakuRecovery {
             permissions = if (preserveInteractions) local.permissions else emptyList(),
             userInputs = if (preserveInteractions) local.userInputs else emptyList(),
         )
+    }
+
+    internal fun localStreamAhead(local: JsonObject, remote: JsonObject): Boolean {
+        val server = remote["runtime_event_cursor"] as? JsonObject ?: return false
+        val cached = local["runtime_event_cursor"] as? JsonObject ?: return false
+        return server["epoch"] == cached["epoch"] && server["runtime_id"] == cached["runtime_id"] &&
+            cached.long("sequence") > server.long("sequence")
     }
 
     fun resolveObservedCommands(snapshot: WakuSnapshot): WakuSnapshot {

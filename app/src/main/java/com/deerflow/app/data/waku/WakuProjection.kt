@@ -46,7 +46,7 @@ object WakuProjection {
             obj("sessionId" to primitive(session.text("id")), "runtimeId" to primitive(it.text("runtime_id")),
                 "epoch" to primitive(it.text("epoch")), "sequence" to (it["sequence"] ?: JsonPrimitive(0)))
         }
-        return WakuSnapshot(session, cursor = cursor, runtimeId = stored?.text("runtime_id"))
+        return WakuSnapshot(WakuSessionTitles.withFallback(session), cursor = cursor, runtimeId = stored?.text("runtime_id"))
     }
 
     /** Call after AttachSession. Late events from an older runtime must not replace the active one. */
@@ -129,7 +129,7 @@ object WakuProjection {
         val cursor = obj("sessionId" to JsonPrimitive(sessionId), "runtimeId" to JsonPrimitive(runtimeId),
             "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
         mutable.values["runtime_event_cursor"] = obj("runtime_id" to JsonPrimitive(runtimeId), "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
-        return snapshot.copy(session = mutable.build(), permissions = permissions, userInputs = userInputs, cursor = cursor,
+        return snapshot.copy(session = WakuSessionTitles.withFallback(mutable.build()), permissions = permissions, userInputs = userInputs, cursor = cursor,
             runtimeId = runtimeId, retiredEpochs = if (epochChanged) (snapshot.retiredEpochs + listOfNotNull(previous?.text("epoch"))).distinct() else snapshot.retiredEpochs)
     }
 
