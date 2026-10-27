@@ -23,6 +23,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.deerflow.app.ui.memory.MemoryScreen
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,6 +38,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
+    var memoryVisible by rememberSaveable { mutableStateOf(false) }
+    if (memoryVisible) { MemoryScreen(onBack = { memoryVisible = false }); return }
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val draft = state.draft
@@ -71,6 +76,7 @@ fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
                 enabled = enabled, label = { Text("服务端模型 ID（可选）") },
                 supportingText = { Text("留空跟随后端默认。填写服务器已配置的模型 ID，保存后在新会话生效。") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
+            TextButton(onClick = { memoryVisible = true }, enabled = enabled) { Text("个人记忆") }
             Text("后台连接", style = MaterialTheme.typography.titleSmall)
             Text("任务执行时持续接收进度与待处理提醒；空闲时切到后台 60 秒后暂停。可在通知栏暂停后台接收。",
                 style = MaterialTheme.typography.bodySmall)

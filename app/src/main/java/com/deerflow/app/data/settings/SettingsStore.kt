@@ -84,6 +84,23 @@ class SettingsStore(private val context: Context) {
 
     suspend fun current(): AppSettings = flow.first()
 
+    private fun memoryKey(endpoint: String) = stringPreferencesKey("memory_pending_" +
+        java.security.MessageDigest.getInstance("SHA-256").digest(endpoint.trim().toByteArray())
+            .joinToString("") { "%02x".format(it) })
+
+    suspend fun pendingMemory(endpoint: String): com.deerflow.app.data.memory.MemoryOperation? {
+        val cipher = context.dataStore.data.first()[memoryKey(endpoint)] ?: return null
+        return com.deerflow.app.data.memory.MemoryJson.decodeFromString(TokenCipher.decrypt(cipher))
+    }
+
+    suspend fun savePendingMemory(endpoint: String, operation: com.deerflow.app.data.memory.MemoryOperation?) {
+        val cipher = operation?.let { TokenCipher.encrypt(com.deerflow.app.data.memory.MemoryJson.encodeToString(
+            com.deerflow.app.data.memory.MemoryOperation.serializer(), it)) }
+        context.dataStore.edit { prefs ->
+            if (cipher == null) prefs.remove(memoryKey(endpoint)) else prefs[memoryKey(endpoint)] = cipher
+        }
+    }
+
     suspend fun save(settings: AppSettings) {
         require(settings.validationError == null) { settings.validationError.orEmpty() }
         // Encrypt before editing: key errors must not commit a partially updated connection.
