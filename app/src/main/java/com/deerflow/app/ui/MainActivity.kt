@@ -1,6 +1,11 @@
 package com.deerflow.app.ui
 
 import android.os.Bundle
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -30,6 +35,8 @@ import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,6 +45,14 @@ class MainActivity : ComponentActivity() {
         setContent {
             DeerflowTheme {
                 AppRoot()
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            val preferences = getSharedPreferences("notification_onboarding", MODE_PRIVATE)
+            if (!preferences.getBoolean("requested", false)) {
+                preferences.edit().putBoolean("requested", true).apply()
+                notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
     }

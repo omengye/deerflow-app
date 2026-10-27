@@ -40,6 +40,18 @@ flowchart LR
 
 当前 v10 的审批请求不在会话快照中，所以恢复时需要扫描存活 runtime 的日志重建交互卡；正文仍按已保存游标去重。若 runtime 已不存在，清理过期交互卡。原生历史导入有条数和字段限制，只能补充缺失记录，不能覆盖已经保存的完整正文和工具块。
 
+## 前后台连接与通知
+
+连接条件由界面可见性、60 秒空闲宽限期和前台服务持有状态共同决定。只在最终“需要连接”值变化时替换连接任务；界面进入后台但服务仍运行时，不会取消旧 socket。恢复前台使用有期限的只读请求检查连接，不自动重复提交任务。
+
+提交消息前先记录传输计数，并在 Activity 仍可见时申请前台服务；原有服务端任务在前台同步后也可启动保护。任务、待处理交互或未确认操作尚存在时继续接收；任务结束后释放服务。通知的“暂停后台接收”和系统超时只释放订阅，不发送 cancel/stop 任务命令。服务采用 START_NOT_STICKY，不在进程重启或开机时重放用户命令。
+
+前台服务类型为 dataSync，用于同步服务器会话和执行进度，并声明相应权限和常驻通知。Android 15 及以上的后台时限通过 onTimeout 及时停止服务处理。通知权限被拒绝不阻止前台聊天，用户可在设置中开启通知；通知正文只含任务状态，不包含对话、参数、输出或凭据。
+
+任务结束／待处理通知仅由当前连接收到的新事件触发，历史回放不重复通知。没有引入 FCM 或厂商推送，因此进程完全终止时不承诺通知送达；重连仍使用原有历史与事件恢复协议。
+
+Android 契约参考：[服务类型](https://developer.android.com/develop/background-work/services/fgs/service-types)、[后台启动限制](https://developer.android.com/develop/background-work/services/fgs/restrictions-bg-start)、[服务运行时限](https://developer.android.com/develop/background-work/services/fgs/timeout)、[通知权限](https://developer.android.com/develop/ui/compose/notifications/notification-permission)。
+
 ## Full Access 的服务端确认
 
 新 runtime 使用 `start.options.mode = fullAccess`。已有原生会话恢复会保留旧审批策略，`applyOptions` 的 mode 也不会改变 DeerFlow 权限，因此发出用户消息前还需确认 `toolApprovalChanged` 的权威状态。若状态为 `ask` 或 `reject_always`，使用当前 session/runtime 发送 `setToolApproval(allow_always)`，只在收到匹配的 `toolApproval` 确认后发送 prompt；`allow_always` 或部署策略 `off` 可直接继续。

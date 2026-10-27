@@ -1,6 +1,10 @@
 package com.deerflow.app.ui.settings
 
 import androidx.activity.compose.BackHandler
+import android.content.Intent
+import android.provider.Settings
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +36,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 @Composable
 fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     val draft = state.draft
     val enabled = state.loaded && !state.saving
     BackHandler(enabled = state.saving) { }
@@ -66,6 +71,13 @@ fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
                 enabled = enabled, label = { Text("服务端模型 ID（可选）") },
                 supportingText = { Text("留空跟随后端默认。填写服务器已配置的模型 ID，保存后在新会话生效。") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
+            Text("后台连接", style = MaterialTheme.typography.titleSmall)
+            Text("任务执行时持续接收进度与待处理提醒；空闲时切到后台 60 秒后暂停。可在通知栏暂停后台接收。",
+                style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = {
+                context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+            }) { Text("通知设置") }
             Text("工具权限：Full Access", style = MaterialTheme.typography.titleSmall)
             Text("普通工具自动授权。已有会话在发送下一条消息前应用；服务器要求的特殊审批仍会显示。",
                 style = MaterialTheme.typography.bodySmall)

@@ -1,6 +1,13 @@
 package com.deerflow.app.data
 
 import android.content.Context
+import android.content.Intent
+import androidx.core.content.ContextCompat
+import com.deerflow.app.data.background.BackgroundConnectionPolicy
+import com.deerflow.app.data.background.BackgroundConnectionService
+import com.deerflow.app.data.background.BackgroundWork
+import com.deerflow.app.data.background.TaskNotifications
+import java.util.concurrent.atomic.AtomicBoolean
 import com.deerflow.app.data.agui.AguiJson
 import com.deerflow.app.data.settings.AppSettings
 import com.deerflow.app.data.settings.SettingsStore
@@ -29,7 +36,13 @@ class ConversationRepository(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) {
     private val network = NetworkMonitor(appContext)
-    private val foreground = MutableStateFlow(false)
+    private val retention = BackgroundConnectionPolicy(scope)
+    private val serviceRequested = AtomicBoolean(false)
+    private val outgoingOperations = MutableStateFlow(0)
+    private val backgroundSummary = MutableStateFlow(BackgroundWork())
+    private val taskNotifications by lazy { TaskNotifications(appContext) }
+    val backgroundConnection = retention.state
+    val backgroundWork = combine(backgroundSummary, outgoingOperations) { work, count -> work.copy(transmitting = count) }
     private val refreshSignal = MutableStateFlow(0L)
     private val mutex = Mutex()
     private val operations = Mutex()
@@ -96,14 +109,14 @@ class ConversationRepository(
     init {
         scope.launch {
             legacyIndex = readLegacyIndex()
-            combine(settings.flow, foreground, network.isAvailable, refreshSignal, network.changes) { cfg, visible, online, _, _ ->
-                Triple(cfg, visible, online)
-            }.collectLatest { (cfg, visible, online) ->
+            combine(settings.flow, retention.keepConnected, network.isAvailable, refreshSignal, network.changes) { cfg, keepConnected, online, _, _ ->
+                Triple(cfg, keepConnected, online)
+            }.collectLatest { (cfg, keepConnected, online) ->
                 try {
                     val current = activateProfile(cfg)
                     if (!cfg.isConfigured) {
                         setConnection(current, if (cfg.needsReconfiguration) "旧接口配置需要重新设置为 Waku /v1" else cfg.validationError ?: "请配置连接", false)
-                    } else if (!visible) setConnection(current, "应用在后台，连接已暂停；服务器任务继续运行", false)
+                    } else if (!keepConnected) setConnection(current, "后台接收已暂停，返回应用后自动恢复；服务器任务继续运行", false)
                     else if (!online) setConnection(current, "网络不可用，等待恢复", false)
                     else connectLoop(current)
                 } catch (cancelled: CancellationException) { throw cancelled }
@@ -114,9 +127,54 @@ class ConversationRepository(
                 }
             }
         }
+        scope.launch(Dispatchers.Main.immediate) {
+            combine(backgroundWork, retention.state) { work, state -> work to state }.collect { (work, state) ->
+                if (work.hasWork && state.visible && state.pauseReason == null && !state.serviceActive) {
+                    ensureBackgroundService()
+                }
+            }
+        }
     }
 
-    fun setForeground(value: Boolean) { foreground.value = value }
+    fun setForeground(value: Boolean) {
+        val returning = value && !retention.state.value.visible
+        retention.setVisible(value)
+        if (value && (backgroundSummary.value.hasWork || outgoingOperations.value > 0)) ensureBackgroundService()
+        if (returning) active?.let { link ->
+            scope.launch {
+                try {
+                    // A screen-off socket can be half-open even while Android still reports a network.
+                    val response = link.client.request(wakuCommand("getSettings"), timeoutMs = 8_000)
+                    require(response.s("type") == "settings")
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) {
+                    if (active === link && retention.state.value.visible) refresh()
+                }
+            }
+        }
+    }
+
+    private fun ensureBackgroundService() {
+        val state = retention.state.value
+        if (!state.visible || state.pauseReason != null || state.serviceActive || !serviceRequested.compareAndSet(false, true)) return
+        try {
+            ContextCompat.startForegroundService(appContext, Intent(appContext, BackgroundConnectionService::class.java))
+        } catch (_: RuntimeException) {
+            serviceRequested.set(false)
+            retention.pause("系统暂不允许后台接收，返回应用后会恢复")
+        }
+    }
+
+    fun backgroundServiceStarted() {
+        retention.serviceStarted()
+        serviceRequested.set(false)
+    }
+    fun backgroundServiceStopped() {
+        serviceRequested.set(false)
+        retention.serviceStopped()
+    }
+    fun pauseBackgroundConnection(reason: String) { retention.pause(reason) }
+
     fun refresh() { refreshSignal.update { it + 1 } }
 
     private suspend fun activateProfile(cfg: AppSettings): Profile = mutex.withLock {
@@ -435,6 +493,11 @@ class ConversationRepository(
             if (link.runtimes[id]?.catchingUp == false) wire.s("runtimeId")?.let { scheduleArtifacts(link, id, it) }
         }
         putSnapshot(link.profile, id, snapshot)
+        if (!retention.state.value.visible && link.runtimes[id]?.catchingUp == false &&
+            eventKind in setOf("turnFinished", "permission", "userInputRequested")) {
+            // Replayed history never re-notifies; notification failures cannot break synchronization.
+            runCatching { taskNotifications.event(id, needsAttention = eventKind != "turnFinished") }
+        }
     }
 
     /** Called under mutex; asynchronous replies must continue through the independent event consumer. */
@@ -527,6 +590,12 @@ class ConversationRepository(
                 put("uri", file.uri.toString()); put("name", file.displayName); put("mimeType", primitive(file.mimeType)); put("size", file.sizeBytes?.let(::JsonPrimitive) ?: JsonNull)
             } }))
         }
+        val retainSubmission = target != null && !id.startsWith("legacy:")
+        if (retainSubmission) {
+            // Request protection while the initiating Activity is still visible, before upload/start.
+            outgoingOperations.update { it + 1 }
+            ensureBackgroundService()
+        }
         return scope.launch {
             if (target == null || id.startsWith("legacy:")) return@launch
             try {
@@ -556,6 +625,8 @@ class ConversationRepository(
                 }
                 showError(target, error.message ?: "发送失败，原文已保留")
             }
+        }.also { job ->
+            if (retainSubmission) job.invokeOnCompletion { outgoingOperations.update { count -> (count - 1).coerceAtLeast(0) } }
         }
     }
 
@@ -869,6 +940,13 @@ class ConversationRepository(
             ThreadMeta(id, session.s("auto_title")?.takeIf { session.s("title") == "New task" } ?: session.s("title") ?: "New task", session.n("updated_at") * 1000, true)
         }.sortedByDescending { it.lastActive } + legacyIndex
         _runningThreadIds.value = rows.filterValues { it.s("status") in BUSY }.keys
+        val running = rows.values.filter { it.s("provider") == "deerFlow" && it.s("status") in BUSY }
+        backgroundSummary.value = BackgroundWork(
+            runningTasks = running.size,
+            waitingTasks = running.count { it.s("status") == "waiting" },
+            pendingOperations = p.snapshots.values.filter { it.session.s("provider") == "deerFlow" }
+                .sumOf { stored -> stored.pendingCommands.count { it.s("state") in setOf("prepared", "sending", "accepted", "unknown") } },
+        )
         val snapshot = p.snapshots[p.selected]
         val readOnly = p.selected.startsWith("legacy:")
         _state.value = if (readOnly) legacyStates.getOrPut(p.selected) { readLegacy(p.selected) } else snapshot?.let { WakuProjection.display(it).appendArtifacts(p.artifacts[p.selected].orEmpty()) }
