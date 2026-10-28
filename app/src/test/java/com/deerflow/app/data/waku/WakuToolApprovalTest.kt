@@ -27,6 +27,31 @@ class WakuToolApprovalTest {
     }
     private fun confirmed() = wakuCommand("toolApproval") { put("mode", "allow_always") }
 
+    @Test fun attachedRuntimeWithoutOldPolicyEventStillRequiresFreshAcknowledgement() = runBlocking {
+        val response = CompletableDeferred<JsonObject>()
+        var sent = 0
+        val helper = WakuToolApproval { command, s, r ->
+            assertEquals("setToolApproval", command.string("type"))
+            assertEquals(session, s); assertEquals(runtime, r)
+            sent++; response.await()
+        }
+        val request = async { helper.ensureFullAccess(session, runtime, allowUninitialized = true) }
+        repeat(3) { yield() }
+        assertEquals(1, sent); assertFalse(request.isCompleted)
+        response.complete(confirmed()); request.await()
+        helper.ensureFullAccess(session, runtime, allowUninitialized = true)
+        assertEquals(1, sent)
+    }
+
+    @Test fun uninitializedPolicyWithLostAckNeverAuthorizesOrResends() = runBlocking {
+        var sent = 0
+        val helper = WakuToolApproval { _, _, _ -> sent++; throw IOException("ack lost") }
+        repeat(2) {
+            assertTrue(runCatching { helper.ensureFullAccess(session, runtime, allowUninitialized = true) }.exceptionOrNull() is IOException)
+        }
+        assertEquals(1, sent)
+    }
+
     @Test fun restoredAskWaitsForExplicitServerAcknowledgementAndSendsOnce() = runBlocking {
         val response = CompletableDeferred<JsonObject>()
         val sent = mutableListOf<JsonObject>()

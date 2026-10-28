@@ -44,6 +44,7 @@ class ConversationRepository(
     val backgroundConnection = retention.state
     val backgroundWork = combine(backgroundSummary, outgoingOperations) { work, count -> work.copy(transmitting = count) }
     private val refreshSignal = MutableStateFlow(0L)
+    private val forceHydration = AtomicBoolean(false)
     private val mutex = Mutex()
     private val operations = Mutex()
     private val initialId = UUID.randomUUID().toString()
@@ -78,6 +79,8 @@ class ConversationRepository(
         val drafts = mutableSetOf<String>()
         val ready = mutableSetOf<String>()
         val syncing = mutableSetOf<String>()
+        val syncStatus = mutableMapOf<String, String>()
+        val syncErrors = mutableMapOf<String, String>()
         val blocked = mutableMapOf<String, String>()
         val artifacts = mutableMapOf<String, List<AgentArtifact>>()
         val artifactErrors = mutableMapOf<String, String>()
@@ -91,6 +94,8 @@ class ConversationRepository(
         var bytes = 0
     }
     private class Link(val profile: Profile, val client: WakuClient) {
+        var forceHydration = false
+        val recovery = WakuSessionRecovery()
         val ended = CompletableDeferred<Throwable>()
         val runtimes = mutableMapOf<String, Runtime>()
         val checkpoint = Channel<Unit>(Channel.CONFLATED)
@@ -112,15 +117,14 @@ class ConversationRepository(
     init {
         scope.launch {
             legacyIndex = readLegacyIndex()
-            combine(settings.flow, retention.keepConnected, network.isAvailable, refreshSignal, network.changes) { cfg, keepConnected, online, _, _ ->
-                Triple(cfg, keepConnected, online)
-            }.collectLatest { (cfg, keepConnected, online) ->
+            connectionRequests(settings.flow, retention.keepConnected, network.state, refreshSignal).collectLatest { request ->
+                val (cfg, keepConnected, networkState) = request
                 try {
                     val current = activateProfile(cfg)
                     if (!cfg.isConfigured) {
                         setConnection(current, if (cfg.needsReconfiguration) "旧接口配置需要重新设置为 Waku /v1" else cfg.validationError ?: "请配置连接", false)
                     } else if (!keepConnected) setConnection(current, "后台接收已暂停，返回应用后自动恢复；服务器任务继续运行", false)
-                    else if (!online) setConnection(current, "网络不可用，等待恢复", false)
+                    else if (!networkState.available) setConnection(current, "网络不可用，等待恢复", false)
                     else connectLoop(current)
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Exception) {
@@ -151,7 +155,7 @@ class ConversationRepository(
                     require(response.s("type") == "settings")
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) {
-                    if (active === link && retention.state.value.visible) refresh()
+                    if (active === link && retention.state.value.visible) refreshSignal.update { it + 1 }
                 }
             }
         }
@@ -178,7 +182,7 @@ class ConversationRepository(
     }
     fun pauseBackgroundConnection(reason: String) { retention.pause(reason) }
 
-    fun refresh() { refreshSignal.update { it + 1 } }
+    fun refresh() { forceHydration.set(true); refreshSignal.update { it + 1 } }
 
     private suspend fun activateProfile(cfg: AppSettings): Profile = mutex.withLock {
         val key = WakuSessionStore.profileNamespace(cfg.endpoint, cfg.token)
@@ -211,7 +215,24 @@ class ConversationRepository(
         while (currentCoroutineContext().isActive && profile === current) {
             setConnection(current, if (attempt == 0) "正在连接服务器…" else "连接中断，正在重新同步…", false)
             val link = Link(current, WakuClient(current.config.endpoint, current.config.token, UUID.randomUUID().toString(), incomingCapacity = 512))
-            link.artifacts = WakuTaskArtifacts(File(appContext.cacheDir, "waku-${current.key}")) { command, session, runtime ->
+            link.forceHydration = forceHydration.getAndSet(false)
+            link.artifacts = WakuTaskArtifacts(File(appContext.cacheDir, "waku-${current.key}"),
+                readCheckpoint = { id, runtime -> mutex.withLock {
+                    ensureCurrent(link)
+                    current.snapshots[id]?.let { snapshot -> snapshot.artifactReplay?.takeIf {
+                        it.position?.runtimeId == runtime && it.position.epoch == snapshot.replayPosition()?.epoch
+                    } }
+                } },
+                saveCheckpoint = { id, checkpoint -> mutex.withLock {
+                    ensureCurrent(link)
+                    val snapshot = current.snapshots.getValue(id)
+                    if (snapshot.replayPosition()?.epoch == checkpoint.position?.epoch) {
+                        val ready = newestReady(snapshot.taskReady, checkpoint.taskReady)
+                        putSnapshot(current, id, snapshot.copy(artifactReplay = checkpoint, taskReady = ready), false)
+                        flushLocal(current)
+                    }
+                } },
+            ) { command, session, runtime ->
                 ensureCurrent(link)
                 link.client.request(command, session, runtime)
             }
@@ -232,7 +253,7 @@ class ConversationRepository(
                     mutex.withLock {
                         if (profile === current) flushLocal(current)
                         if (active === link) {
-                            active = null; current.ready.clear(); current.syncing.clear()
+                            active = null; current.ready.clear(); current.syncing.clear(); current.syncStatus.clear()
                             _isConnected.value = false; publish(current)
                         }
                     }
@@ -250,6 +271,7 @@ class ConversationRepository(
     private suspend fun runConnection(link: Link): Throwable = coroutineScope {
         link.client.connect()
         ensureCurrent(link)
+        setConnection(link.profile, "已连接，正在同步会话…", true)
         val receive = launch {
             try {
                 for (wire in link.client.incoming) {
@@ -265,6 +287,7 @@ class ConversationRepository(
         }
         val watch = launch {
             val closed = link.client.state.filterIsInstance<WakuConnectionState.Disconnected>().first()
+            setConnection(link.profile, closed.failure?.message ?: "连接中断，正在恢复", false)
             link.ended.complete(closed.failure ?: IOException("连接中断"))
         }
         val localWriter = launch {
@@ -285,6 +308,7 @@ class ConversationRepository(
                 catch (error: Exception) { setConnection(link.profile, "会话正在本地保存；服务器同步失败：${error.message}", true) }
             }
         }
+        val recoveryJobs = mutableListOf<Job>()
         try {
             loadCatalog(link)
             val toRestore = mutex.withLock {
@@ -292,10 +316,29 @@ class ConversationRepository(
                 val p = link.profile
                 (listOf(p.selected) + p.catalog.filterValues { it.s("status") in BUSY }.keys).distinct().filterNot { it.startsWith("legacy:") }
             }
-            for (id in toRestore) hydrateAttach(link, id)
+            // Each session unlocks independently. Failure in another task cannot block this chat.
+            for (id in toRestore) recoveryJobs += launch {
+                var retry = 0
+                while (isActive && active === link) {
+                    try { hydrateAttach(link, id, forceHydrate = link.forceHydration && retry == 0); break }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: Exception) {
+                        val recoveredElsewhere = mutex.withLock {
+                            ensureCurrent(link)
+                            if (id in link.profile.ready && id !in link.profile.syncing) return@withLock true
+                            link.profile.syncErrors[id] = "同步未完成：${error.message ?: "连接暂时不可用"}；将从已保存进度重试"
+                            publish(link.profile)
+                            false
+                        }
+                        if (recoveredElsewhere) break
+                        delay(WakuRecovery.retryDelayMillis(retry++))
+                    }
+                }
+            }
             setConnection(link.profile, "已连接", true)
             link.ended.await()
         } finally {
+            recoveryJobs.forEach { it.cancel() }
             receive.cancel(); watch.cancel(); localWriter.cancel(); serverWriter.cancel(); titleReader.cancel()
         }
     }
@@ -361,10 +404,15 @@ class ConversationRepository(
         }
     }
 
-    private suspend fun hydrateAttach(link: Link, id: String) {
+    private suspend fun hydrateAttach(link: Link, id: String, forceHydrate: Boolean = false) = link.recovery.run(id) {
+        hydrateAttachOnce(link, id, forceHydrate)
+    }
+
+    private suspend fun hydrateAttachOnce(link: Link, id: String, forceHydrate: Boolean) {
         val shouldHydrate = mutex.withLock {
             ensureCurrent(link)
-            if (id in link.profile.syncing) return
+            link.profile.syncErrors.remove(id)
+            link.profile.syncStatus[id] = "正在校验会话…"
             link.profile.syncing += id; link.profile.ready -= id; publish(link.profile)
             id in link.profile.remoteIds
         }
@@ -377,16 +425,13 @@ class ConversationRepository(
                 }
                 return
             }
-            val response = link.client.request(wakuCommand("hydrateSession") { put("sessionId", id) })
-            val remote = response["session"] as? JsonObject ?: error("服务器会话已不存在")
-            mutex.withLock {
-                ensureCurrent(link)
-                val chosen = WakuRecovery.resolveObservedCommands(WakuRecovery.chooseSnapshot(link.profile.snapshots[id], remote)).copy(remoteKnown = true)
-                putSnapshot(link.profile, id, chosen, serverDirty = false)
-            }
             val attached = link.client.request(wakuCommand("attachSession"), id)
             require(attached.s("type") == "sessionRuntime") { "无法识别服务器运行时" }
             val runtimeId = attached.s("runtimeId")
+            val cached = mutex.withLock { ensureCurrent(link); link.profile.snapshots[id] }
+            if (forceHydrate || runtimeId == null || cached?.replayPosition()?.runtimeId != runtimeId) {
+                hydrateSnapshot(link, id)
+            }
             if (runtimeId == null) recoverNativeHistory(link, id)
             else {
                 mutex.withLock {
@@ -396,11 +441,42 @@ class ConversationRepository(
                     putSnapshot(p, id, WakuProjection.bindRuntime(p.snapshots.getValue(id), runtimeId), serverDirty = false)
                     link.runtimes[id] = Runtime(runtimeId)
                 }
-                catchUp(link, id, runtimeId)
+                try { catchUp(link, id, runtimeId) }
+                catch (changed: ReplayEpochChanged) {
+                    hydrateSnapshot(link, id, changed.actualEpoch)
+                    mutex.withLock {
+                        ensureCurrent(link)
+                        val p = link.profile
+                        putSnapshot(p, id, WakuProjection.bindRuntime(p.snapshots.getValue(id), runtimeId), false)
+                        link.runtimes[id] = Runtime(runtimeId)
+                    }
+                    catchUp(link, id, runtimeId)
+                }
             }
-            mutex.withLock { ensureCurrent(link); link.profile.ready += id }
+            mutex.withLock {
+                ensureCurrent(link); link.profile.ready += id; link.profile.syncErrors.remove(id)
+            }
         } finally {
-            mutex.withLock { if (active === link) { link.profile.syncing -= id; publish(link.profile) } }
+            withContext(NonCancellable) {
+                mutex.withLock { if (active === link) {
+                    link.profile.syncing -= id; link.profile.syncStatus.remove(id); publish(link.profile)
+                } }
+            }
+        }
+    }
+
+    private suspend fun hydrateSnapshot(link: Link, id: String, epoch: String? = null) {
+        val remote = link.client.request(wakuCommand("hydrateSession") { put("sessionId", id) })["session"] as? JsonObject
+            ?: error("服务器会话已不存在")
+        mutex.withLock {
+            ensureCurrent(link)
+            val p = link.profile
+            var snapshot = if (epoch == null) WakuRecovery.chooseSnapshot(p.snapshots[id], remote)
+                else WakuProjection.fromSession(remote).copy(pendingCommands = p.snapshots[id]?.pendingCommands.orEmpty())
+            if (epoch != null && snapshot.replayPosition()?.epoch != epoch) {
+                snapshot = snapshot.copy(cursor = null, session = snapshot.session.patch("runtime_event_cursor" to JsonNull))
+            }
+            putSnapshot(p, id, WakuRecovery.resolveObservedCommands(snapshot).copy(remoteKnown = true), false)
         }
     }
 
@@ -420,7 +496,7 @@ class ConversationRepository(
             putSnapshot(link.profile, id, restored, false)
             publish(link.profile)
         }
-        if (cursor != null) {
+        if (cursor != null && snapshot.session.arr("messages").isEmpty() && snapshot.session.arr("transcript_blocks").isEmpty()) {
             val cwd = mutex.withLock { cwd(link.profile, snapshot.session) }
             val result = link.client.request(wakuCommand("loadProviderSession") { put("cursor", cursor); put("cwd", cwd) })
             val history = result["history"] as? JsonObject ?: error("无法读取原生会话历史")
@@ -443,68 +519,80 @@ class ConversationRepository(
     }
 
     private suspend fun catchUp(link: Link, id: String, runtimeId: String) {
-        // A full log scan also recovers v10 permission cards, which AgentSession does not contain.
-        var after = 0L
-        var through: Long? = null
-        var epoch: String? = null
-        var permissions = emptyList<JsonObject>()
-        var questions = emptyList<JsonObject>()
-        do {
-            val page = link.client.request(wakuCommand("replayEvents") {
-                put("epoch", primitive(epoch)); put("afterSequence", after); put("throughSequence", through?.let(::JsonPrimitive) ?: JsonNull); put("limit", 256)
-            }, id, runtimeId)
-            val boundary = WakuRecovery.validateReplayPage(page, runtimeId, id, after, through)
-            val pageEpoch = page.s("epoch") ?: error("重放缺少 epoch")
-            require(epoch == null || epoch == pageEpoch) { "分页期间服务器已重启" }
-            if (epoch == null) {
-                val oldEpoch = mutex.withLock { ensureCurrent(link); link.profile.snapshots[id]?.cursor?.s("epoch") }
-                if (oldEpoch != null && oldEpoch != pageEpoch) {
-                    val hydrated = link.client.request(wakuCommand("hydrateSession") { put("sessionId", id) })["session"] as? JsonObject ?: error("无法刷新重启后的会话")
-                    mutex.withLock {
-                        ensureCurrent(link)
-                        val pending = link.profile.snapshots[id]?.pendingCommands.orEmpty()
-                        putSnapshot(link.profile, id, WakuProjection.bindRuntime(WakuProjection.fromSession(hydrated).copy(pendingCommands = pending, remoteKnown = true), runtimeId), false)
-                    }
+        val initial = mutex.withLock { ensureCurrent(link); link.profile.snapshots.getValue(id) }
+        val end = WakuReplayRunner().run(id, runtimeId, initial.replayPosition(),
+            request = { command -> ensureCurrent(link); link.client.request(command, id, runtimeId) },
+            commit = { page -> mutex.withLock {
+                ensureCurrent(link)
+                for (wire in page.events) {
+                    link.artifacts.onWireEvent(wire)
+                    link.toolApproval.onWireEvent(wire)
+                    applyEvent(link, wire)
                 }
-                epoch = pageEpoch; through = boundary
-            }
-            for (wire in page.objs("events")) {
-                link.artifacts.onWireEvent(wire)
-                link.toolApproval.onWireEvent(wire)
-                val event = wire["event"] as? JsonObject ?: continue
-                val payload = event["payload"] as? JsonObject
-                when (event.s("kind")) {
-                    "permission" -> if (payload != null) permissions = permissions.filterNot { it.s("requestId") == payload.s("requestId") } + payload
-                    "userInputRequested" -> if (payload != null) questions = questions.filterNot { it.s("requestId") == payload.s("requestId") } + payload
-                    "promptSubmitted", "turnStarted", "turnFinished", "processExited" -> { permissions = emptyList(); questions = emptyList() }
-                    "permissionResolved" -> permissions = permissions.filterNot { it.s("requestId") == payload?.s("requestId") }
-                    "userInputResolved" -> questions = questions.filterNot { it.s("requestId") == payload?.s("requestId") }
-                }
-                mutex.withLock { ensureCurrent(link); applyEvent(link, wire) }
-            }
-            after = page.n("nextSequence")
-        } while (page.b("hasMore"))
+                val p = link.profile
+                putSnapshot(p, id, p.snapshots.getValue(id).atReplayPosition(page.position), false)
+                flushLocal(p)
+                p.syncStatus[id] = "正在同步会话… ${page.percent}%"
+                publish(p)
+            } },
+        )
+        recoverInteractions(link, id, runtimeId, end)
         mutex.withLock {
             ensureCurrent(link)
             val p = link.profile
             val runtime = link.runtimes[id] ?: error("运行时已改变")
-            runtime.epoch = epoch
+            runtime.epoch = end.epoch
             var snapshot = p.snapshots.getValue(id)
-            if (snapshot.session.s("status") == "waiting") {
-                val accepted = snapshot.pendingCommands.filter { it.s("state") == "accepted" }.mapNotNull { it.s("targetRequestId") }.toSet()
-                snapshot = snapshot.copy(permissions = permissions.filterNot { it.s("requestId") in accepted }, userInputs = questions.filterNot { it.s("requestId") in accepted })
+            if (snapshot.session.s("status") != "waiting") {
+                snapshot = snapshot.copy(permissions = emptyList(), userInputs = emptyList(), interactionsVerified = true)
                 putSnapshot(p, id, snapshot, false)
             }
+            snapshot.taskReady?.takeIf { it.s("epoch") == end.epoch && it.s("runtimeId") == runtimeId }
+                ?.let(link.artifacts::onWireEvent)
             val buffered = runtime.buffered.toList()
             runtime.buffered.clear(); runtime.bytes = 0; runtime.catchingUp = false
             for (wire in buffered) {
-                require(wire.s("epoch") == epoch) { "重放期间运行时发生变化" }
+                require(wire.s("epoch") == end.epoch) { "重放期间运行时发生变化" }
                 applyEvent(link, wire)
             }
             flushLocal(p)
             publish(p)
             if (p.snapshots[id]?.session?.s("status") !in BUSY) scheduleArtifacts(link, id, runtimeId)
         }
+    }
+
+    private suspend fun recoverInteractions(link: Link, id: String, runtimeId: String, through: WakuReplayPosition) {
+        val snapshot = mutex.withLock { ensureCurrent(link); link.profile.snapshots.getValue(id) }
+        if (snapshot.session.s("status") != "waiting" || snapshot.interactionsVerified) return
+        var checkpoint = snapshot.interactionReplay?.takeIf {
+            it.position?.epoch == through.epoch && it.position.runtimeId == runtimeId && it.position.sequence <= through.sequence
+        } ?: WakuControlCheckpoint(position = WakuReplayPosition(runtimeId, through.epoch, 0))
+        WakuReplayRunner().run(id, runtimeId, checkpoint.position, through.sequence,
+            request = { command -> ensureCurrent(link); link.client.request(command, id, runtimeId) },
+            commit = { page ->
+                checkpoint = checkpoint.advance(page)
+                mutex.withLock {
+                    ensureCurrent(link)
+                    val p = link.profile
+                    val current = p.snapshots.getValue(id)
+                    val accepted = current.pendingCommands.filter { it.s("state") == "accepted" }.mapNotNull { it.s("targetRequestId") }.toSet()
+                    putSnapshot(p, id, current.copy(interactionReplay = checkpoint,
+                        taskReady = newestReady(current.taskReady, checkpoint.taskReady),
+                        permissions = if (page.hasMore) current.permissions else checkpoint.permissions.filterNot { it.s("requestId") in accepted },
+                        userInputs = if (page.hasMore) current.userInputs else checkpoint.questions.filterNot { it.s("requestId") in accepted },
+                        interactionsVerified = !page.hasMore), false)
+                    flushLocal(p)
+                    p.syncStatus[id] = "正在恢复待处理操作… ${page.percent}%"
+                    publish(p)
+                }
+            },
+        )
+    }
+
+    private fun newestReady(first: JsonObject?, second: JsonObject?): JsonObject? = when {
+        second == null -> first
+        first == null || first.s("epoch") != second.s("epoch") || second.n("sequence") > first.n("sequence") -> second
+        else -> first
     }
 
     private suspend fun receiveEvent(link: Link, wire: JsonObject) {
@@ -619,7 +707,12 @@ class ConversationRepository(
         if (!id.startsWith("legacy:") && link != null) operations.withLock {
             try { hydrateAttach(link, id) }
             catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { showError(link.profile, error.message ?: "同步失败") }
+            catch (error: Exception) { mutex.withLock {
+                if (active === link && (id !in link.profile.ready || id in link.profile.syncing)) {
+                    link.profile.syncErrors[id] = "同步未完成：${error.message ?: "请重新同步"}"
+                    publish(link.profile)
+                }
+            } }
         }
     }
 
@@ -748,7 +841,7 @@ class ConversationRepository(
             }
             // A resumed DeerFlow session retains its backend approval policy. A runtime mode
             // or an applyOptions ACK alone cannot confirm Full Access.
-            link.toolApproval.ensureFullAccess(id, requireNotNull(runtimeId))
+            link.toolApproval.ensureFullAccess(id, requireNotNull(runtimeId), allowUninitialized = true)
             mutex.withLock {
                 ensureCurrent(link)
                 val latest = link.profile.snapshots.getValue(id)
@@ -999,12 +1092,14 @@ class ConversationRepository(
         _state.value = if (readOnly) legacyStates.getOrPut(p.selected) { readLegacy(p.selected) } else snapshot?.let { WakuProjection.display(it).appendArtifacts(p.artifacts[p.selected].orEmpty()) }
             ?: ConversationState(p.selected, status = "正在加载会话…")
         p.blocked[p.selected]?.let { _state.value = _state.value.copy(status = it) }
-        if (p.selected in p.syncing) _state.value = _state.value.copy(status = "正在恢复事件与历史…")
+        p.syncErrors[p.selected]?.let { _state.value = _state.value.copy(status = it) }
+        if (p.selected in p.syncing) _state.value = _state.value.copy(status = p.syncStatus[p.selected] ?: "正在同步会话…")
         p.artifactErrors[p.selected]?.let { error ->
             _state.value = _state.value.upsert("waku:artifact-error", BlockKind.ERROR, "产物", error)
         }
-        _pendingPermissions.value = snapshot?.permissions.orEmpty()
-        _pendingQuestions.value = snapshot?.userInputs.orEmpty()
+        val actionsReady = p.selected in p.ready && p.selected !in p.syncing && snapshot?.interactionsVerified == true
+        _pendingPermissions.value = if (actionsReady) snapshot?.permissions.orEmpty() else emptyList()
+        _pendingQuestions.value = if (actionsReady) snapshot?.userInputs.orEmpty() else emptyList()
         _unknownSubmission.value = snapshot?.pendingCommands?.filter { it.s("kind") == "prompt" || it.s("state") in setOf("unknown", "notSent", "rejected") }
             ?.takeIf { it.isNotEmpty() }?.joinToString("\n\n") { command ->
             val state = when (command.s("state")) {

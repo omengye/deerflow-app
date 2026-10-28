@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-28",
+  "branch": "codex/waku-mobile-resilience",
+  "baseline_commit": "2d56a97",
+  "version_name": "2.1.1",
+  "version_code": 8,
+  "validation": {
+    "tests": 138,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "lint_errors": 0,
+    "lint_warnings": 21
+  },
+  "scenarios": {
+    "cached_event_cursor": 1802,
+    "long_history_events": 100000,
+    "virtual_slow_page_seconds": 20,
+    "durable_recovery_interruptions": 24,
+    "network_handovers": 30,
+    "real_tcp_limit_kib_per_second": 16,
+    "real_tcp_mid_frame_disconnects": 3,
+    "real_tcp_cached_messages": 10000,
+    "real_tcp_replayed_events": 512,
+    "real_tcp_download_bytes_upper_bound": 400000,
+    "real_tcp_test_seconds": 10.335
+  },
+  "apk": {
+    "path": "dist/deerflow-2.1.1-recovery.apk",
+    "size_bytes": 68320327,
+    "sha256": "76ff4445c82d080cf172faf98835ba9f363bd25559c1c5439428e61dec86ab8d",
+    "signature_v2_verified": true
+  },
+  "physical_android_device_tested": false,
+  "server_protocol": "Waku v10; unchanged",
+  "cleanup": {
+    "junit_temporary_folders_removed": true,
+    "synthetic_tcp_servers_closed": true,
+    "task_started_adb_server_stopped": true,
+    "ad_hoc_temporary_files_created": false,
+    "apk_and_reports_preserved": true,
+    "preexisting_gradle_wrapper_scripts_preserved": true
+  }
+}

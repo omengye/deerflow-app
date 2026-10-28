@@ -22,8 +22,8 @@ android {
         applicationId = "com.deerflow.app"
         minSdk = 30
         targetSdk = 36
-        versionCode = 7
-        versionName = "2.1.0"
+        versionCode = 8
+        versionName = "2.1.1"
     }
 
     signingConfigs {
@@ -83,4 +83,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.coil.compose)
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.okhttp.mockwebserver)
 }

@@ -20,6 +20,10 @@ data class WakuSnapshot(
     val runtimeId: String? = null,
     val retiredEpochs: List<String> = emptyList(),
     val remoteKnown: Boolean = false,
+    val interactionsVerified: Boolean = false,
+    val interactionReplay: WakuControlCheckpoint? = null,
+    val artifactReplay: WakuControlCheckpoint? = null,
+    val taskReady: JsonObject? = null,
 )
 
 /** Waku v10 wire projection. Unknown session fields survive round trips unchanged. */
@@ -46,14 +50,16 @@ object WakuProjection {
             obj("sessionId" to primitive(session.text("id")), "runtimeId" to primitive(it.text("runtime_id")),
                 "epoch" to primitive(it.text("epoch")), "sequence" to (it["sequence"] ?: JsonPrimitive(0)))
         }
-        return WakuSnapshot(WakuSessionTitles.withFallback(session), cursor = cursor, runtimeId = stored?.text("runtime_id"))
+        return WakuSnapshot(WakuSessionTitles.withFallback(session), cursor = cursor, runtimeId = stored?.text("runtime_id"),
+            interactionsVerified = session.text("status") != "waiting")
     }
 
     /** Call after AttachSession. Late events from an older runtime must not replace the active one. */
     fun bindRuntime(snapshot: WakuSnapshot, runtimeId: String): WakuSnapshot {
         if (snapshot.runtimeId == runtimeId) return snapshot
         return snapshot.copy(runtimeId = runtimeId, cursor = null, permissions = emptyList(), userInputs = emptyList(),
-            retiredEpochs = emptyList(), session = snapshot.session.changed("runtime_event_cursor" to JsonNull))
+            retiredEpochs = emptyList(), session = snapshot.session.changed("runtime_event_cursor" to JsonNull),
+            interactionsVerified = false, interactionReplay = null, artifactReplay = null, taskReady = null)
     }
 
     fun reduce(snapshot: WakuSnapshot, wire: JsonObject, nowMillis: Long = System.currentTimeMillis()): WakuSnapshot {
@@ -130,7 +136,11 @@ object WakuProjection {
             "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
         mutable.values["runtime_event_cursor"] = obj("runtime_id" to JsonPrimitive(runtimeId), "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
         return snapshot.copy(session = WakuSessionTitles.withFallback(mutable.build()), permissions = permissions, userInputs = userInputs, cursor = cursor,
-            runtimeId = runtimeId, retiredEpochs = if (epochChanged) (snapshot.retiredEpochs + listOfNotNull(previous?.text("epoch"))).distinct() else snapshot.retiredEpochs)
+            runtimeId = runtimeId, retiredEpochs = if (epochChanged) (snapshot.retiredEpochs + listOfNotNull(previous?.text("epoch"))).distinct() else snapshot.retiredEpochs,
+            interactionsVerified = (snapshot.interactionsVerified && !epochChanged) || kind in setOf("promptSubmitted", "turnStarted", "turnFinished", "processExited"),
+            interactionReplay = if (epochChanged) null else snapshot.interactionReplay,
+            artifactReplay = if (epochChanged) null else snapshot.artifactReplay,
+            taskReady = if (kind == "deerflowTasks" && data?.text("kind") == "ready") wire else if (epochChanged) null else snapshot.taskReady)
     }
 
     fun display(snapshot: WakuSnapshot): ConversationState {

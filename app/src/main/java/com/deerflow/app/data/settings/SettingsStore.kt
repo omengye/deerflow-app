@@ -18,6 +18,7 @@ import javax.crypto.spec.GCMParameterSpec
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 private val Context.dataStore by preferencesDataStore(
     name = "deerflow_settings",
@@ -80,7 +81,7 @@ class SettingsStore(private val context: Context) {
             modelName = prefs[modelKey]?.takeIf(String::isNotBlank),
             needsReconfiguration = (prefs[endpointKey] != null && prefs[configuredKey] != "true") || decrypted.isFailure,
         )
-    }
+    }.distinctUntilChanged()
 
     suspend fun current(): AppSettings = flow.first()
 

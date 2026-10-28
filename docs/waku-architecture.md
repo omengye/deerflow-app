@@ -33,12 +33,14 @@ flowchart LR
 ## 断线恢复顺序
 
 1. `hello` 验证 Token 与协议版本。认证/版本错误停止自动重连；普通网络错误使用指数退避和抖动。
-2. `loadTaskState` 读取目录，再 `hydrateSession` 读取完整会话。列表中的空历史字段不得覆盖完整缓存。
-3. `attachSession` 附加现有 runtime，连接恢复不调用 `start` 替换执行进程。
-4. 固定 `throughSequence`，分页 `replayEvents`，同期实时事件进入有限缓冲。按 session/runtime/epoch/sequence 验证并去重后再接入实时事件。
-5. 内容和游标写入同一原子文件，随后检查点同步到服务器。游标不能先于对应内容持久化。
+2. 握手成功即标记网络已连接；`loadTaskState` 读取目录，目录中的空历史字段不覆盖完整缓存。会话恢复状态与网络状态分开显示。
+3. `attachSession` 附加现有 runtime，优先使用与其匹配的本地原子快照。仅无有效缓存、主动刷新、runtime/epoch 变化或 runtime 已结束时通过 `hydrateSession` 核对完整历史，不调用 `start` 替换执行进程。
+4. 从已保存游标开始，固定 `throughSequence`，以每页最多 64 个事件增量读取；每页响应有 30 秒超时。同期实时事件进入有限缓冲，按 session/runtime/epoch/sequence 验证并去重后接入。
+5. 每页的内容与游标写入同一原子文件后才请求下一页，中断后不从零重放。会话单独解锁；同一会话的并发恢复共用结果，失败不会被误判为已完成。同步进度与错误在会话状态栏显示。
 
-当前 v10 的审批请求不在会话快照中，所以恢复时需要扫描存活 runtime 的日志重建交互卡；正文仍按已保存游标去重。若 runtime 已不存在，清理过期交互卡。原生历史导入有条数和字段限制，只能补充缺失记录，不能覆盖已经保存的完整正文和工具块。
+当前 v10 的审批请求不在服务端会话快照中。只有处于 waiting 且本地交互状态未经验证时才单独补读控制历史，控制游标逐页落盘；补读完成前不显示未经核对的交互卡。任务产物的 Ready 信息另行缓存，缺失时在后台补读，也保存进度。runtime/epoch 变化会丢弃旧权限和产物连接信息。若 runtime 已不存在，清理过期交互卡。原生历史导入只用于正文与工具块都缺失的快照。
+
+连接输入由实际配置、后台保留策略、原子的网络状态及显式刷新序号组成。相同配置去重，因此记忆回执落盘不会取消聊天订阅；网络切换仍会更换连接。迟到页在取消或链接身份检查失败后不能提交。
 
 ## 会话标题
 
@@ -60,7 +62,7 @@ Android 契约参考：[服务类型](https://developer.android.com/develop/back
 
 ## Full Access 的服务端确认
 
-新 runtime 使用 `start.options.mode = fullAccess`。已有原生会话恢复会保留旧审批策略，`applyOptions` 的 mode 也不会改变 DeerFlow 权限，因此发出用户消息前还需确认 `toolApprovalChanged` 的权威状态。若状态为 `ask` 或 `reject_always`，使用当前 session/runtime 发送 `setToolApproval(allow_always)`，只在收到匹配的 `toolApproval` 确认后发送 prompt；`allow_always` 或部署策略 `off` 可直接继续。
+新 runtime 使用 `start.options.mode = fullAccess`。已有原生会话恢复会保留旧审批策略，`applyOptions` 的 mode 不改变 DeerFlow 权限。下一条消息发送前，若当前链接尚未收到权限广播，或状态不是 `allow_always` / `off`，按用户既有 Full Access 设置向已附加的 session/runtime 发出 `setToolApproval(allow_always)`；只有匹配的服务端确认才允许发送 prompt。无需为寻找旧权限广播重放整段正文；权限回执丢失仍不自动重发设置或消息。
 
 权限跟踪器仅保存本连接上的事件证据，按 session/runtime/epoch/sequence 隔离；本地 `runtime_mode` 不是授权依据。断线和超时不会自动重复切换权限或发送 prompt。活动轮次及挂起审批仍由服务端约束，不把 Full Access 实现为客户端自动点击全部审批卡。
 

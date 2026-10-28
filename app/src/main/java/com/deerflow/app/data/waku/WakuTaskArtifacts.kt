@@ -25,6 +25,8 @@ class WakuTaskArtifacts(
     private val maxTotalBytes: Long = 128L * 1024 * 1024,
     private val chunkBytes: Int = 256 * 1024,
     private val requestTimeoutMs: Long = 30_000,
+    private val readCheckpoint: suspend (String, String) -> WakuControlCheckpoint? = { _, _ -> null },
+    private val saveCheckpoint: suspend (String, WakuControlCheckpoint) -> Unit = { _, _ -> },
     private val send: suspend (command: JsonObject, sessionId: String, runtimeId: String) -> JsonObject,
 ) {
     private data class Key(val session: String, val runtime: String)
@@ -152,35 +154,15 @@ class WakuTaskArtifacts(
             checkData(!closed, "连接已断开")
             if (bindings.containsKey(key)) return
         }
-        var after = 0L
-        var through: Long? = null
-        var epoch: String? = null
-        repeat(128) {
-            val page = send(wakuCommand("replayEvents") {
-                put("epoch", epoch?.let(::JsonPrimitive) ?: JsonNull)
-                put("afterSequence", after); put("throughSequence", through?.let(::JsonPrimitive) ?: JsonNull); put("limit", 256)
-            }, key.session, key.runtime)
-            checkData(page.text("type") == "replayEvents", "无法恢复任务产物连接")
-            val pageEpoch = page.requiredText("epoch")
-            checkData(epoch == null || epoch == pageEpoch, "任务连接版本已变化")
-            val upper = page.requiredLong("throughSequence")
-            checkData(through == null || through == upper, "任务连接重放边界变化")
-            val next = page.requiredLong("nextSequence")
-            checkData(next in after..upper, "任务连接重放游标无效")
-            var sequence = after
-            for (element in page.requiredArray("events")) {
-                val wire = element as? JsonObject ?: throw IOException("无效的任务连接事件")
-                checkData(wire.text("sessionId") == key.session && wire.text("runtimeId") == key.runtime && wire.text("epoch") == pageEpoch, "任务连接事件身份不匹配")
-                val number = wire.requiredLong("sequence")
-                checkData(number > sequence && number <= next, "任务连接事件顺序无效")
-                sequence = number
-                onWireEvent(wire)
-            }
-            if (!page.requiredBoolean("hasMore")) return
-            checkData(next > after, "任务连接重放未推进")
-            after = next; through = upper; epoch = pageEpoch
-        }
-        throw IOException("任务历史过长，无法在本次恢复产物连接")
+        var checkpoint = readCheckpoint(key.session, key.runtime) ?: WakuControlCheckpoint()
+        WakuReplayRunner(pageTimeoutMs = requestTimeoutMs).run(key.session, key.runtime, checkpoint.position,
+            request = { send(it, key.session, key.runtime) },
+            commit = { page ->
+                checkpoint = checkpoint.advance(page)
+                saveCheckpoint(key.session, checkpoint)
+            },
+        )
+        checkpoint.taskReady?.let(::onWireEvent)
     }
 
     private suspend fun control(key: Key, binding: Binding, action: JsonObject, responseKind: String): JsonObject {

@@ -76,12 +76,12 @@ class WakuToolApproval(
         }
     }
 
-    suspend fun ensureFullAccess(sessionId: String, runtimeId: String) {
+    suspend fun ensureFullAccess(sessionId: String, runtimeId: String, allowUninitialized: Boolean = false) {
         requireWakuUuid(sessionId, "会话标识")
         requireWakuUuid(runtimeId, "运行时标识")
         val completed = withTimeoutOrNull(confirmationTimeoutMs) {
             coroutineScope {
-                val worker = async { confirm(Key(sessionId, runtimeId)) }
+                val worker = async { confirm(Key(sessionId, runtimeId), allowUninitialized) }
                 try {
                     select<Unit> {
                         disconnectSignal.onAwait { throw disconnectedError() }
@@ -98,13 +98,15 @@ class WakuToolApproval(
         }
     }
 
-    private suspend fun confirm(key: Key) {
+    private suspend fun confirm(key: Key, allowUninitialized: Boolean) {
         val policy = synchronized(lock) {
             checkConnected()
             policies.getOrPut(key) { Policy() }
         }
         policy.operation.withLock {
-            while (true) {
+            // An attached/reconciled runtime may precede the cached policy event. The user's
+            // explicit Full Access preference can be set, but still requires a fresh server ACK.
+            while (!allowUninitialized) {
                 val pending = synchronized(lock) {
                     checkConnected()
                     if (policy.mode != null) null else policy.changed

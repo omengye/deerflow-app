@@ -25,10 +25,15 @@ object WakuRecovery {
             listOf("title", "project_id", "workspace").forEach { key -> remote[key]?.let { put(key, it) } }
         }))
         val preserveInteractions = sameStream && remote.string("status") == "waiting"
+        val samePosition = sameStream && serverCursor?.long("sequence") == localCursor?.long("sequence")
         return WakuProjection.fromSession(remote).copy(
             pendingCommands = local.pendingCommands,
             permissions = if (preserveInteractions) local.permissions else emptyList(),
             userInputs = if (preserveInteractions) local.userInputs else emptyList(),
+            interactionsVerified = remote.string("status") != "waiting" || (samePosition && local.interactionsVerified),
+            interactionReplay = if (sameStream) local.interactionReplay else null,
+            artifactReplay = if (sameStream) local.artifactReplay else null,
+            taskReady = if (samePosition) local.taskReady else null,
         )
     }
 

@@ -10,12 +10,9 @@ import kotlinx.coroutines.flow.asStateFlow
 /** App-lifetime reachability hints. Socket health remains authoritative, including on a private LAN. */
 class NetworkMonitor(context: Context) {
     private val manager = context.getSystemService(ConnectivityManager::class.java)
-    private val mutableAvailable = MutableStateFlow(false)
-    private val mutableRevision = MutableStateFlow(0L)
+    private val mutableState = MutableStateFlow(NetworkStatus())
     private var lastNetwork: Network? = null
-    val isAvailable = mutableAvailable.asStateFlow()
-    /** Wi-Fi to cellular handover must reconnect even when both networks report available. */
-    val changes = mutableRevision.asStateFlow()
+    val state = mutableState.asStateFlow()
 
     private val callback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) = refresh()
@@ -39,7 +36,6 @@ class NetworkMonitor(context: Context) {
             )
         val changed = lastNetwork != network
         lastNetwork = network
-        mutableAvailable.value = usable
-        if (changed) mutableRevision.value += 1
+        mutableState.value = NetworkStatus(usable, mutableState.value.revision + if (changed) 1 else 0)
     }
 }
