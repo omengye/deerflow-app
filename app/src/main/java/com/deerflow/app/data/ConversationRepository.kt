@@ -548,6 +548,10 @@ class ConversationRepository(
             link.runtimes.remove(id)
             if (wasBusy) link.profile.blocked[id] = "运行时已不可用。已读取原生历史；请在桌面核对或恢复执行，手机不会自动继续。"
             else link.profile.blocked.remove(id)
+            if (id in link.profile.artifactErrors) {
+                val retained = if (link.profile.artifacts[id].isNullOrEmpty()) "" else "已下载的文件仍可使用。"
+                link.profile.artifactErrors[id] = "聊天历史已恢复，但服务器当前没有此会话的文件读取连接，未完成文件暂时无法下载。$retained"
+            }
             putSnapshot(link.profile, id, WakuRecovery.resolveObservedCommands(restored), serverDirty = false)
         }
     }

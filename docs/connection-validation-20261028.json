@@ -10,8 +10,11 @@
   "lint": {
     "Warning": 21
   },
-  "apk_sha256": "d330295dc2335dc9f27b09c6b31735a70422d2d14fb1eb5b50dffd10a5a6beeb",
+  "apk_sha256": "e4f526c8a492122410fcb2d0be9a8d2e3810eca1cf70bb1538c290dcc01f9348",
   "physical_android_device_tested": false,
   "server_protocol": 10,
-  "artifact_partial_across_disconnect": false
+  "artifact_partial_across_disconnect": false,
+  "signature_v2_verified": true,
+  "same_signing_certificate_as_2_1_1": true,
+  "stale_artifact_error_after_runtime_end": "updated to unavailable state; cached files retained"
 }
