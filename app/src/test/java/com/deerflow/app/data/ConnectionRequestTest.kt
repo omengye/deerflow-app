@@ -56,4 +56,27 @@ class ConnectionRequestTest {
         assertEquals(listOf(NetworkStatus(true, 1), NetworkStatus(false, 2), NetworkStatus(true, 3)), seen)
         job.cancel()
     }
+
+    @Test fun validationChangesWakeRetryHintsWithoutCancellingHealthyPrivateNetworkConnection() = runTest {
+        val tracker = DefaultNetworkTracker<String>()
+        tracker.available("private-wifi")
+        val privateHints = NetworkHints(usable = true, validated = false, captivePortal = false)
+        val network = MutableStateFlow(tracker.capabilities("private-wifi", privateHints))
+        val requests = mutableListOf<ConnectionRequest>()
+        val retryHints = mutableListOf<Long>()
+        val connectionJob = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            connectionRequests(flowOf(AppSettings()), flowOf(true), network, flowOf(0L)).collect { requests += it }
+        }
+        val retryJob = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            network.map { it.retryRevision }.distinctUntilChanged().drop(1).collect { retryHints += it }
+        }
+        network.value = tracker.capabilities("private-wifi", privateHints.copy(validated = true)); runCurrent()
+        network.value = tracker.capabilities("private-wifi", privateHints); runCurrent()
+        assertEquals(1, requests.size)
+        assertEquals(listOf(1L), retryHints)
+        network.value = tracker.lost("private-wifi"); runCurrent()
+        assertEquals(2, requests.size)
+        assertFalse(requests.last().network.available)
+        connectionJob.cancel(); retryJob.cancel()
+    }
 }

@@ -2,12 +2,14 @@ package com.deerflow.app.data.background
 
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.test.*
 import org.junit.Assert.*
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class BackgroundConnectionPolicyTest {
-    @Test fun coldProcessDoesNotConnectUntilUserOpensApp() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun coldProcessDoesNotConnectUntilUserOpensApp() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 40)
             policy.setVisible(false)
@@ -17,8 +19,8 @@ class BackgroundConnectionPolicyTest {
         } finally { owner.cancel() }
     }
 
-    @Test fun briefBackgroundRoundTripDoesNotEmitADisconnect() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun briefBackgroundRoundTripDoesNotEmitADisconnect() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 100)
             val transitions = mutableListOf<Boolean>()
@@ -27,35 +29,35 @@ class BackgroundConnectionPolicyTest {
             policy.setVisible(false); yield()
             assertTrue(policy.state.value.graceActive)
             policy.setVisible(true); yield()
-            delay(130)
+            advanceTimeBy(130); runCurrent()
             assertEquals(listOf(false, true), transitions)
             assertFalse(policy.state.value.graceActive)
             collector.cancelAndJoin()
         } finally { owner.cancel() }
     }
 
-    @Test fun idleBackgroundExpiresAndForegroundReopensIt() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun idleBackgroundExpiresAndForegroundReopensIt() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 30)
             policy.setVisible(true)
             policy.setVisible(false)
             assertTrue(policy.state.value.keepConnected)
-            delay(70)
+            advanceTimeBy(70); runCurrent()
             assertFalse(policy.state.value.keepConnected)
             policy.setVisible(true)
             assertTrue(policy.state.value.keepConnected)
         } finally { owner.cancel() }
     }
 
-    @Test fun activeServiceOutlivesGraceAndCompletionReleasesConnection() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun activeServiceOutlivesGraceAndCompletionReleasesConnection() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 30)
             policy.setVisible(true)
             policy.serviceStarted()
             policy.setVisible(false)
-            delay(70)
+            advanceTimeBy(70); runCurrent()
             assertFalse(policy.state.value.graceActive)
             assertTrue(policy.state.value.keepConnected)
             policy.serviceStopped()
@@ -63,8 +65,8 @@ class BackgroundConnectionPolicyTest {
         } finally { owner.cancel() }
     }
 
-    @Test fun serviceCompletionDuringGraceDoesNotDropSocketEarly() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun serviceCompletionDuringGraceDoesNotDropSocketEarly() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 100)
             policy.setVisible(true)
@@ -72,14 +74,14 @@ class BackgroundConnectionPolicyTest {
             policy.setVisible(false)
             policy.serviceStopped()
             assertTrue(policy.state.value.keepConnected)
-            delay(140)
+            advanceTimeBy(140); runCurrent()
             assertFalse(policy.state.value.keepConnected)
         } finally { owner.cancel() }
     }
 
-    @Test fun pauseAndTimeoutFenceLateServiceStartsUntilForegroundReturns() = runBlocking {
+    @Test fun pauseAndTimeoutFenceLateServiceStartsUntilForegroundReturns() = runTest {
         for (reason in listOf("用户暂停", "系统时限")) {
-            val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+            val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
             try {
                 val policy = BackgroundConnectionPolicy(owner, 100)
                 policy.setVisible(true)
@@ -97,8 +99,8 @@ class BackgroundConnectionPolicyTest {
         }
     }
 
-    @Test fun failedOrPausedBackgroundServiceDoesNotBreakForegroundChat() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun failedOrPausedBackgroundServiceDoesNotBreakForegroundChat() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 100)
             policy.setVisible(true)
@@ -110,24 +112,28 @@ class BackgroundConnectionPolicyTest {
         } finally { owner.cancel() }
     }
 
-    @Test fun newerBackgroundGraceCannotBeExpiredByAnOlderTimer() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun newerBackgroundGraceCannotBeExpiredByAnOlderTimer() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 150)
             policy.setVisible(true)
             policy.setVisible(false)
-            delay(100)
+            advanceTimeBy(100); runCurrent()
             policy.setVisible(true)
             policy.setVisible(false)
-            delay(80)
+            // The first timer's original deadline must not expire the replacement grace.
+            advanceTimeBy(50); runCurrent()
             assertTrue(policy.state.value.keepConnected)
-            delay(110)
+            advanceTimeBy(99); runCurrent()
+            assertTrue(policy.state.value.keepConnected)
+            // The new timer expires at its own exact deadline, independent of host load.
+            advanceTimeBy(1); runCurrent()
             assertFalse(policy.state.value.keepConnected)
         } finally { owner.cancel() }
     }
 
-    @Test fun serviceStateChangesWhileVisibleDoNotRestartTransport() = runBlocking {
-        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    @Test fun serviceStateChangesWhileVisibleDoNotRestartTransport() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner)
             policy.setVisible(true)

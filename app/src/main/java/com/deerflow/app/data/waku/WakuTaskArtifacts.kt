@@ -10,12 +10,17 @@ import java.security.MessageDigest
 import java.util.Base64
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 
 /** Read-only task controls. ACK means queued; only the correlated driver reply contains a result. */
@@ -23,16 +28,20 @@ class WakuTaskArtifacts(
     private val cacheDir: File,
     private val maxFileBytes: Long = 64L * 1024 * 1024,
     private val maxTotalBytes: Long = 128L * 1024 * 1024,
-    private val chunkBytes: Int = 256 * 1024,
+    private val chunkBytes: Int = 32 * 1024,
     private val requestTimeoutMs: Long = 30_000,
+    private val maxReadAttempts: Int = 3,
+    private val retryDelayMs: Long = 500,
     private val readCheckpoint: suspend (String, String) -> WakuControlCheckpoint? = { _, _ -> null },
     private val saveCheckpoint: suspend (String, WakuControlCheckpoint) -> Unit = { _, _ -> },
+    private val beforeRead: suspend (String) -> Unit = {},
     private val send: suspend (command: JsonObject, sessionId: String, runtimeId: String) -> JsonObject,
 ) {
     private data class Key(val session: String, val runtime: String)
     private data class Binding(val connection: String, val acpSession: String, val epoch: String, val sequence: Long, val capabilities: JsonObject)
     private data class Pending(val key: Key, val command: JsonObject, val response: CompletableDeferred<JsonObject>)
     private data class Artifact(val root: String, val node: String, val id: String, val name: String, val mime: String, val size: Long)
+    private class RetryableReadFailure(val code: String) : IOException()
 
     private val lock = Any()
     private val loads = Mutex()
@@ -43,6 +52,7 @@ class WakuTaskArtifacts(
     init {
         require(maxFileBytes > 0 && maxTotalBytes >= maxFileBytes)
         require(chunkBytes in 1..1_048_576 && requestTimeoutMs > 0)
+        require(maxReadAttempts in 1..5 && retryDelayMs in 0..5_000)
     }
 
     /** Call for live AND replayed envelopes, without awaiting loadArtifacts on the event consumer. */
@@ -76,7 +86,10 @@ class WakuTaskArtifacts(
                     if (request.key != key || request.command != command) return
                     pending.remove(id)
                     if (payload.text("kind") == "failed") {
-                        request.response.completeExceptionally(IOException("产物查询未完成：" + (payload.text("message") ?: "请稍后刷新")))
+                        val code = payload.text("code")
+                        val error = if (code in setOf("busy", "timeout")) RetryableReadFailure(code!!)
+                            else IOException("产物查询未完成：" + (payload.text("message") ?: "请稍后刷新"))
+                        request.response.completeExceptionally(error)
                     } else {
                         val response = payload["response"] as? JsonObject
                         if (response == null) request.response.completeExceptionally(IOException("无效的产物查询响应"))
@@ -95,7 +108,11 @@ class WakuTaskArtifacts(
         pending.clear()
     }
 
-    suspend fun loadArtifacts(sessionId: String, runtimeId: String): List<AgentArtifact> = loads.withLock {
+    suspend fun loadArtifacts(
+        sessionId: String,
+        runtimeId: String,
+        onArtifact: suspend (AgentArtifact) -> Unit = {},
+    ): List<AgentArtifact> = loads.withLock {
         withContext(Dispatchers.IO) {
             requireWakuUuid(sessionId, "sessionId")
             requireWakuUuid(runtimeId, "runtimeId")
@@ -144,7 +161,7 @@ class WakuTaskArtifacts(
                 }
                 treeCursor = nextCursor(page, treeCursors)
             } while (treeCursor != null)
-            files.values.map { download(key, binding, it) }
+            files.values.map { download(key, binding, it).also { file -> onArtifact(file) } }
         }
     }
 
@@ -155,8 +172,9 @@ class WakuTaskArtifacts(
             if (bindings.containsKey(key)) return
         }
         var checkpoint = readCheckpoint(key.session, key.runtime) ?: WakuControlCheckpoint()
-        WakuReplayRunner(pageTimeoutMs = requestTimeoutMs).run(key.session, key.runtime, checkpoint.position,
-            request = { send(it, key.session, key.runtime) },
+        val pageBudget = requestTimeoutMs * maxReadAttempts + retryDelayMs * maxReadAttempts * (maxReadAttempts - 1) / 2 + 1_000
+        WakuReplayRunner(pageTimeoutMs = pageBudget).run(key.session, key.runtime, checkpoint.position,
+            request = { command -> retryRead(key, "恢复产物索引") { send(command, key.session, key.runtime) } },
             commit = { page ->
                 checkpoint = checkpoint.advance(page)
                 saveCheckpoint(key.session, checkpoint)
@@ -166,6 +184,39 @@ class WakuTaskArtifacts(
     }
 
     private suspend fun control(key: Key, binding: Binding, action: JsonObject, responseKind: String): JsonObject {
+        val label = when (action.text("kind")) {
+            "list" -> "查询任务列表"
+            "artifactList" -> "查询文件列表"
+            "artifactRead" -> "读取文件分块"
+            else -> throw IOException("不支持自动重试此任务操作")
+        }
+        return retryRead(key, label) { controlOnce(key, binding, action, responseKind) }
+    }
+
+    /** Only this allowlisted read path retries; message submission/approval never reaches it. */
+    private suspend fun retryRead(key: Key, label: String, read: suspend () -> JsonObject): JsonObject {
+        for (attempt in 1..maxReadAttempts) {
+            beforeRead(key.session)
+            synchronized(lock) { checkData(!closed, "连接已断开，文件读取暂停，请稍后重试") }
+            try {
+                return withTimeoutOrNull(requestTimeoutMs) { read() } ?: throw RetryableReadFailure("timeout")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val transient = error is RetryableReadFailure || error is WakuRequestException && error.delivery != WakuDelivery.REJECTED
+                if (!transient) throw error
+                synchronized(lock) { checkData(!closed, "连接已断开，文件读取暂停，请稍后重试") }
+                if (attempt == maxReadAttempts) {
+                    val reason = if (error is RetryableReadFailure && error.code == "busy") "暂时繁忙" else "超时或连接中断"
+                    throw IOException("${label}${reason}，已尝试 $attempt 次，请稍后重试", error)
+                }
+                delay(retryDelayMs * attempt)
+            }
+        }
+        error("read attempts exhausted")
+    }
+
+    private suspend fun controlOnce(key: Key, binding: Binding, action: JsonObject, responseKind: String): JsonObject {
         val id = UUID.randomUUID().toString()
         val command = buildJsonObject {
             put("requestId", id); put("connectionId", binding.connection); put("sessionId", binding.acpSession); put("action", action)
@@ -176,15 +227,24 @@ class WakuTaskArtifacts(
             pending[id] = Pending(key, command, response)
         }
         try {
-            val result = withTimeout(requestTimeoutMs) {
-                val ack = send(wakuCommand("deerFlowTasks") { put("command", command) }, key.session, key.runtime)
-                checkData(ack.text("type") == "ack", "产物请求未被服务器接受")
-                response.await()
+            val result = supervisorScope {
+                val acknowledged = async {
+                    val ack = send(wakuCommand("deerFlowTasks") { put("command", command) }, key.session, key.runtime)
+                    checkData(ack.text("type") == "ack", "产物请求未被服务器接受")
+                }
+                try {
+                    // A correlated driver reply is authoritative even if the transport ACK is
+                    // delayed/lost. ACK alone only means queued and cannot complete this read.
+                    select<JsonObject> {
+                        response.onAwait { it }
+                        acknowledged.onAwait { response.await() }
+                    }
+                } catch (error: WakuRequestException) {
+                    if (response.isCompleted && !response.isCancelled) response.await() else throw error
+                } finally { acknowledged.cancelAndJoin() }
             }
             checkData(result.text("kind") == responseKind, "产物查询结果类型不匹配")
             return result["data"] as? JsonObject ?: throw IOException("产物查询缺少结果")
-        } catch (_: TimeoutCancellationException) {
-            throw IOException("产物查询超时，请重新刷新；没有自动重试")
         } finally {
             synchronized(lock) { pending.remove(id) }
         }

@@ -34,13 +34,19 @@ class WakuClient(
     private val token: String,
     val clientId: String,
     private val socketFactory: WebSocket.Factory = defaultSocketFactory,
-    private val handshakeTimeoutMs: Long = 15_000,
+    private val handshakeTimeoutMs: Long = 30_000,
     incomingCapacity: Int = 64,
+    private val clockMillis: () -> Long = { System.nanoTime() / 1_000_000 },
+    private val diagnostics: (WakuConnectionDiagnostic) -> Unit = {},
 ) {
-    private class Attempt(val generation: Long) {
+    private class Attempt(val generation: Long, val startedAtMillis: Long) {
         val ready = CompletableDeferred<Unit>()
         var socket: WebSocket? = null
         var connected = false
+        var connectedAtMillis: Long? = null
+        var lastReceivedAtMillis: Long? = null
+        var endedAtMillis: Long? = null
+        var stage = "connecting"
     }
 
     private class Pending(
@@ -53,12 +59,22 @@ class WakuClient(
     private val lock = Any()
     private var generation = 0L
     private var active: Attempt? = null
+    private var latest: Attempt? = null
     private var permanentlyClosed = false
     private val pending = mutableMapOf<String, Pending>()
     private val mutableState = MutableStateFlow<WakuConnectionState>(WakuConnectionState.Disconnected())
 
     val state: StateFlow<WakuConnectionState> = mutableState.asStateFlow()
     val incoming: Channel<JsonObject> = Channel(incomingCapacity.also { require(it > 0) })
+    val health: WakuConnectionHealth get() = synchronized(lock) {
+        val attempt = latest
+        WakuConnectionHealth(
+            active?.connected == true,
+            attempt?.lastReceivedAtMillis,
+            attempt?.connectedAtMillis?.let { (attempt.endedAtMillis ?: clockMillis()) - it },
+            mutableState.value == WakuConnectionState.Connecting,
+        )
+    }
 
     init {
         requireWakuUuid(clientId, "clientId")
@@ -76,9 +92,11 @@ class WakuClient(
                 attempt = current
                 createSocket = false
             } else {
-                attempt = Attempt(++generation)
+                attempt = Attempt(++generation, clockMillis())
                 active = attempt
+                latest = attempt
                 mutableState.value = WakuConnectionState.Connecting
+                diagnostic(attempt)
                 createSocket = true
             }
         }
@@ -187,6 +205,8 @@ class WakuClient(
                     return
                 }
                 attempt.socket = webSocket
+                attempt.stage = "authenticating"
+                diagnostic(attempt)
                 val hello = buildJsonObject {
                     put("type", "hello")
                     put("protocolVersion", WAKU_PROTOCOL_VERSION)
@@ -220,7 +240,14 @@ class WakuClient(
                 401, 403 -> WakuConnectionFailure.AUTHENTICATION
                 else -> WakuConnectionFailure.NETWORK
             }
-            fail(attempt, connectionError(kind))
+            val transport = when {
+                response != null -> "http_${response.code}"
+                t is java.net.UnknownHostException -> "dns"
+                t is javax.net.ssl.SSLException -> "tls"
+                t is java.net.SocketTimeoutException -> "transport_timeout"
+                else -> "transport"
+            }
+            fail(attempt, connectionError(kind), transport)
         }
     }
 
@@ -254,14 +281,22 @@ class WakuClient(
                     fail(attempt, connectionError(WakuConnectionFailure.PROTOCOL))
                 } else {
                     attempt.connected = true
+                    attempt.connectedAtMillis = clockMillis()
+                    attempt.lastReceivedAtMillis = attempt.connectedAtMillis
+                    attempt.stage = "connected"
+                    diagnostic(attempt)
                     mutableState.value = WakuConnectionState.Connected
                     attempt.ready.complete(Unit)
                 }
                 return
             }
             when (type) {
-                "response" -> response(attempt, message)
+                "response" -> {
+                    attempt.lastReceivedAtMillis = clockMillis()
+                    response(attempt, message)
+                }
                 "event", "taskStateChanged", "shuttingDown" -> {
+                    attempt.lastReceivedAtMillis = clockMillis()
                     if (incoming.trySend(message).isFailure) {
                         fail(attempt, connectionError(WakuConnectionFailure.OVERFLOW))
                     } else if (type == "shuttingDown") {
@@ -300,9 +335,11 @@ class WakuClient(
         }
     }
 
-    private fun fail(attempt: Attempt, error: WakuConnectionException) {
+    private fun fail(attempt: Attempt, error: WakuConnectionException, transport: String? = null) {
         synchronized(lock) {
             if (!isActive(attempt)) return
+            attempt.endedAtMillis = clockMillis()
+            diagnostic(attempt, error.kind, transport)
             active = null
             ++generation
             mutableState.value = WakuConnectionState.Disconnected(error)
@@ -324,6 +361,12 @@ class WakuClient(
     }
 
     private fun isActive(attempt: Attempt) = active === attempt && generation == attempt.generation
+
+    private fun diagnostic(attempt: Attempt, failure: WakuConnectionFailure? = null, transport: String? = null) {
+        runCatching {
+            diagnostics(WakuConnectionDiagnostic(attempt.stage, clockMillis() - attempt.startedAtMillis, failure, transport))
+        }
+    }
 
     private fun closeError(code: Int) = connectionError(
         when (code) {
@@ -351,6 +394,8 @@ class WakuClient(
 
     companion object {
         private val defaultSocketFactory: WebSocket.Factory = OkHttpClient.Builder()
+            .connectTimeout(25, TimeUnit.SECONDS)
+            .readTimeout(25, TimeUnit.SECONDS)
             .pingInterval(20, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false)
             .build()

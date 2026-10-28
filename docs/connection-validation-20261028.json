@@ -1,0 +1,17 @@
+{
+  "version": "2.1.2",
+  "version_code": 9,
+  "android": {
+    "tests": 168,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "lint": {
+    "Warning": 21
+  },
+  "apk_sha256": "d330295dc2335dc9f27b09c6b31735a70422d2d14fb1eb5b50dffd10a5a6beeb",
+  "physical_android_device_tested": false,
+  "server_protocol": 10,
+  "artifact_partial_across_disconnect": false
+}

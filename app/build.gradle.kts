@@ -22,8 +22,8 @@ android {
         applicationId = "com.deerflow.app"
         minSdk = 30
         targetSdk = 36
-        versionCode = 8
-        versionName = "2.1.1"
+        versionCode = 9
+        versionName = "2.1.2"
     }
 
     signingConfigs {

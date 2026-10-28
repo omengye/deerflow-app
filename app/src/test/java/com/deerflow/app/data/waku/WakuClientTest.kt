@@ -5,6 +5,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.*
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Protocol
@@ -16,9 +18,78 @@ import okio.ByteString
 import org.junit.Assert.*
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class WakuClientTest {
     private val clientId = "10000000-0000-0000-0000-000000000001"
     private val requestId = "20000000-0000-0000-0000-000000000001"
+
+    @Test fun defaultHandshakeBudgetAllowsDelayedAuthenticationBeyondOldFifteenSeconds() = runTest {
+        val factory = FakeFactory()
+        val events = mutableListOf<WakuConnectionDiagnostic>()
+        val client = WakuClient("ws://example.test:18787/v1", "test-private-token", clientId, factory,
+            clockMillis = { currentTime }, diagnostics = events::add)
+        val connection = async { client.connect() }
+        runCurrent()
+        advanceTimeBy(10_000); factory.sockets.single().open()
+        advanceTimeBy(15_000); factory.sockets.single().hello(); runCurrent()
+        connection.await()
+        assertEquals(WakuConnectionState.Connected, client.state.value)
+        assertEquals(listOf("connecting", "authenticating", "connected"), events.map { it.stage })
+        assertEquals(listOf(0L, 10_000L, 25_000L), events.map { it.elapsedMillis })
+        assertFalse(events.toString().contains("test-private-token"))
+        client.close()
+    }
+
+    @Test fun actualConnectedLifetimeResetsBackoffAfterStableSessionAndClosePreservesDuration() = runTest {
+        val factory = FakeFactory()
+        val client = WakuClient("ws://example.test:18787/v1", "test-private-token", clientId, factory,
+            clockMillis = { currentTime })
+        val attempts = mutableListOf<Int>()
+        val supervisor = WakuConnectionSupervisor(retryDelay = { attempts += it; 1 })
+        supervisor.awaitRetry(null); supervisor.awaitRetry(null)
+        open(client, factory)
+        advanceTimeBy(20_000)
+        factory.sockets.single().failure()
+        client.close()
+        assertFalse(client.health.connected)
+        assertEquals(20_000L, client.health.connectedForMillis)
+        advanceTimeBy(5_000)
+        assertEquals(20_000L, client.health.connectedForMillis)
+        supervisor.awaitRetry(client.health.connectedForMillis)
+        assertEquals(listOf(0, 1, 0), attempts)
+    }
+
+    @Test fun oldCallbacksCannotRefreshNewSocketHealth() = runTest {
+        val factory = FakeFactory()
+        val client = WakuClient("ws://example.test:18787/v1", "test-private-token", clientId, factory,
+            clockMillis = { currentTime })
+        open(client, factory)
+        val old = factory.sockets.single()
+        advanceTimeBy(1_000); old.failure()
+        advanceTimeBy(1_000); open(client, factory)
+        assertEquals(2_000L, client.health.lastReceivedAtMillis)
+        advanceTimeBy(3_000)
+        old.message("""{"type":"taskStateChanged","revision":1}""")
+        assertEquals(2_000L, client.health.lastReceivedAtMillis)
+        factory.sockets.last().message("""{"type":"taskStateChanged","revision":2}""")
+        assertEquals(5_000L, client.health.lastReceivedAtMillis)
+        client.close()
+    }
+
+    @Test fun handshakeTimeoutRemainsBoundedAndClassifiesWithoutExceptionDetails() = runTest {
+        val factory = FakeFactory()
+        val events = mutableListOf<WakuConnectionDiagnostic>()
+        val client = WakuClient("ws://example.test:18787/v1", "test-private-token", clientId, factory,
+            clockMillis = { currentTime }, diagnostics = events::add)
+        val connection = async { runCatching { client.connect() } }
+        runCurrent(); factory.sockets.single().open()
+        advanceTimeBy(30_000); runCurrent()
+        assertEquals(WakuConnectionFailure.TIMEOUT, (connection.await().exceptionOrNull() as WakuConnectionException).kind)
+        assertEquals("authenticating", events.last().stage)
+        assertEquals(30_000L, events.last().elapsedMillis)
+        assertTrue(factory.sockets.single().cancelled)
+        client.close()
+    }
 
     @Test
     fun normalizesOnlyAppServerEndpoints() {

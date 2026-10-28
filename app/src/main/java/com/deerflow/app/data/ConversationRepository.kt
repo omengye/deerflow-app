@@ -37,6 +37,8 @@ class ConversationRepository(
 ) {
     private val network = NetworkMonitor(appContext)
     private val retention = BackgroundConnectionPolicy(scope)
+    // elapsedRealtime includes deep sleep, so a socket from before Doze is not treated as fresh.
+    private val connectionSupervisor = WakuConnectionSupervisor(clockMillis = android.os.SystemClock::elapsedRealtime)
     private val serviceRequested = AtomicBoolean(false)
     private val outgoingOperations = MutableStateFlow(0)
     private val backgroundSummary = MutableStateFlow(BackgroundWork())
@@ -95,6 +97,7 @@ class ConversationRepository(
     }
     private class Link(val profile: Profile, val client: WakuClient) {
         var forceHydration = false
+        var reconnectImmediately = false
         val recovery = WakuSessionRecovery()
         val ended = CompletableDeferred<Throwable>()
         val runtimes = mutableMapOf<String, Runtime>()
@@ -102,7 +105,7 @@ class ConversationRepository(
         val titleRefresh = Channel<Unit>(Channel.CONFLATED)
         val titleChecked = mutableMapOf<String, JsonObject>()
         val catalogRefresh = Mutex()
-        val artifactLoading = mutableSetOf<String>()
+        val artifactJobs = mutableMapOf<String, Job>()
         lateinit var artifacts: WakuTaskArtifacts
         lateinit var toolApproval: WakuToolApproval
     }
@@ -141,24 +144,18 @@ class ConversationRepository(
                 }
             }
         }
+        scope.launch {
+            network.state.map { it.retryRevision }.distinctUntilChanged().drop(1).collect {
+                connectionSupervisor.networkRecovered()
+            }
+        }
     }
 
     fun setForeground(value: Boolean) {
         val returning = value && !retention.state.value.visible
         retention.setVisible(value)
         if (value && (backgroundSummary.value.hasWork || outgoingOperations.value > 0)) ensureBackgroundService()
-        if (returning) active?.let { link ->
-            scope.launch {
-                try {
-                    // A screen-off socket can be half-open even while Android still reports a network.
-                    val response = link.client.request(wakuCommand("getSettings"), timeoutMs = 8_000)
-                    require(response.s("type") == "settings")
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) {
-                    if (active === link && retention.state.value.visible) refreshSignal.update { it + 1 }
-                }
-            }
-        }
+        if (returning) connectionSupervisor.foreground()
     }
 
     private fun ensureBackgroundService() {
@@ -212,9 +209,13 @@ class ConversationRepository(
 
     private suspend fun connectLoop(current: Profile) {
         var attempt = 0
+        connectionSupervisor.resetFailures()
         while (currentCoroutineContext().isActive && profile === current) {
             setConnection(current, if (attempt == 0) "正在连接服务器…" else "连接中断，正在重新同步…", false)
-            val link = Link(current, WakuClient(current.config.endpoint, current.config.token, UUID.randomUUID().toString(), incomingCapacity = 512))
+            val link = Link(current, WakuClient(current.config.endpoint, current.config.token, UUID.randomUUID().toString(), incomingCapacity = 512,
+                clockMillis = android.os.SystemClock::elapsedRealtime,
+                diagnostics = { event -> android.util.Log.i("WakuConnection", "stage=${event.stage} elapsedMs=${event.elapsedMillis} failure=${event.failure} transport=${event.transport}") },
+            ))
             link.forceHydration = forceHydration.getAndSet(false)
             link.artifacts = WakuTaskArtifacts(File(appContext.cacheDir, "waku-${current.key}"),
                 readCheckpoint = { id, runtime -> mutex.withLock {
@@ -232,6 +233,16 @@ class ConversationRepository(
                         flushLocal(current)
                     }
                 } },
+                beforeRead = { id ->
+                    outgoingOperations.first { it == 0 }
+                    mutex.withLock {
+                        ensureCurrent(link)
+                        if (current.selected != id || id in current.syncing || outgoingOperations.value > 0 ||
+                            current.snapshots[id]?.pendingCommands?.isNotEmpty() == true || current.snapshots[id]?.session?.s("status") in BUSY) {
+                            throw CancellationException("优先同步当前会话，文件读取已暂停")
+                        }
+                    }
+                },
             ) { command, session, runtime ->
                 ensureCurrent(link)
                 link.client.request(command, session, runtime)
@@ -242,7 +253,25 @@ class ConversationRepository(
             }
             active = link
             val failure = try {
-                runConnection(link)
+                coroutineScope {
+                    val foreground = launch {
+                        connectionSupervisor.monitorForeground(
+                            health = { link.client.health },
+                            probe = { timeout ->
+                                val response = link.client.request(wakuCommand("getSettings"), timeoutMs = timeout)
+                                require(response.s("type") == "settings")
+                            },
+                            reconnect = {
+                                if (active === link && retention.state.value.visible) {
+                                    link.reconnectImmediately = true
+                                    link.ended.complete(IOException("连接已失去响应，正在重新连接"))
+                                    link.client.close()
+                                }
+                            },
+                        )
+                    }
+                    try { runConnection(link) } finally { foreground.cancelAndJoin() }
+                }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { error }
             finally {
@@ -264,7 +293,8 @@ class ConversationRepository(
                 return
             }
             setConnection(current, "${failure.message ?: "连接中断"}；将自动重连，不重发操作", false)
-            delay(WakuRecovery.retryDelayMillis(attempt++))
+            attempt++
+            connectionSupervisor.awaitRetry(link.client.health.connectedForMillis, immediate = link.reconnectImmediately)
         }
     }
 
@@ -411,6 +441,7 @@ class ConversationRepository(
     private suspend fun hydrateAttachOnce(link: Link, id: String, forceHydrate: Boolean) {
         val shouldHydrate = mutex.withLock {
             ensureCurrent(link)
+            link.artifactJobs[id]?.cancel()
             link.profile.syncErrors.remove(id)
             link.profile.syncStatus[id] = "正在校验会话…"
             link.profile.syncing += id; link.profile.ready -= id; publish(link.profile)
@@ -460,6 +491,9 @@ class ConversationRepository(
             withContext(NonCancellable) {
                 mutex.withLock { if (active === link) {
                     link.profile.syncing -= id; link.profile.syncStatus.remove(id); publish(link.profile)
+                    if (id in link.profile.ready && link.profile.snapshots[id]?.session?.s("status") !in BUSY) {
+                        link.runtimes[id]?.let { scheduleArtifacts(link, id, it.id) }
+                    }
                 } }
             }
         }
@@ -557,7 +591,6 @@ class ConversationRepository(
             }
             flushLocal(p)
             publish(p)
-            if (p.snapshots[id]?.session?.s("status") !in BUSY) scheduleArtifacts(link, id, runtimeId)
         }
     }
 
@@ -622,6 +655,7 @@ class ConversationRepository(
         if (snapshot === previous) return
         snapshot = WakuRecovery.resolveObservedCommands(snapshot)
         val eventKind = (wire["event"] as? JsonObject)?.s("kind")
+        if (eventKind in setOf("promptSubmitted", "turnStarted")) link.artifactJobs[id]?.cancel()
         if (eventKind in setOf("turnFinished", "processExited")) {
             snapshot = snapshot.copy(pendingCommands = snapshot.pendingCommands.filter { it.s("kind") == "prompt" })
             link.checkpoint.trySend(Unit)
@@ -637,20 +671,37 @@ class ConversationRepository(
 
     /** Called under mutex; asynchronous replies must continue through the independent event consumer. */
     private fun scheduleArtifacts(link: Link, id: String, runtimeId: String) {
-        if (!link.artifactLoading.add(id)) return
-        scope.launch {
+        if (link.profile.selected != id || link.artifactJobs[id]?.isActive == true) return
+        lateinit var job: Job
+        job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val files = link.artifacts.loadArtifacts(id, runtimeId)
+                val files = link.artifacts.loadArtifacts(id, runtimeId) { file ->
+                    mutex.withLock {
+                        if (active === link) {
+                            val completed = link.profile.artifacts[id].orEmpty().filterNot { it.path == file.path } + file
+                            link.profile.artifacts[id] = completed
+                            publish(link.profile)
+                        }
+                    }
+                }
                 mutex.withLock {
                     if (active === link) { link.profile.artifacts[id] = files; link.profile.artifactErrors.remove(id); publish(link.profile) }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
                 mutex.withLock {
-                    if (active === link) { link.profile.artifactErrors[id] = "产物读取失败，点击刷新可重试：${error.message}"; publish(link.profile) }
+                    if (active === link) {
+                        val retained = if (link.profile.artifacts[id].isNullOrEmpty()) "" else "已下载的文件仍可使用。"
+                        link.profile.artifactErrors[id] = "文件读取未完成。${retained}点击刷新可重试：${error.message}"
+                        publish(link.profile)
+                    }
                 }
-            } finally { mutex.withLock { link.artifactLoading.remove(id) } }
+            } finally { withContext(NonCancellable) { mutex.withLock {
+                if (link.artifactJobs[id] === job) link.artifactJobs.remove(id)
+            } } }
         }
+        link.artifactJobs[id] = job
+        job.start()
     }
 
     private suspend fun checkpoint(link: Link) {
@@ -692,6 +743,7 @@ class ConversationRepository(
         mutex.withLock {
             val p = profile ?: return@withLock
             val id = UUID.randomUUID().toString()
+            active?.takeIf { it.profile === p }?.artifactJobs?.values?.forEach { it.cancel() }
             createDraft(p, id); p.selected = id
             if (_isConnected.value) p.ready += id
             publish(p)
@@ -701,6 +753,7 @@ class ConversationRepository(
     fun selectThread(id: String) = scope.launch {
         val link = mutex.withLock {
             val p = profile ?: return@launch
+            active?.takeIf { it.profile === p }?.artifactJobs?.filterKeys { it != id }?.values?.forEach { it.cancel() }
             p.selected = id; publish(p)
             active?.takeIf { it.profile === p }
         }
@@ -984,6 +1037,7 @@ class ConversationRepository(
     }
     private suspend fun recordPending(p: Profile, id: String, command: JsonObject) = mutex.withLock {
         val snapshot = p.snapshots[id] ?: error("会话尚未加载")
+        active?.takeIf { it.profile === p }?.artifactJobs?.values?.forEach { it.cancel() }
         val hadPrevious = snapshot.pendingCommands.isNotEmpty()
         putSnapshot(p, id, snapshot.copy(pendingCommands = snapshot.pendingCommands + command), false)
         publish(p)
