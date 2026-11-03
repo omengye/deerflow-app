@@ -16,6 +16,7 @@ object WakuSessionTitles {
 
     /** Thin catalog rows have no event cursor. Only full hydration can resolve automatic-title races. */
     fun mergeMetadata(local: JsonObject, remote: JsonObject, fullSnapshot: Boolean = false): JsonObject {
+        if (WakuRecovery.historyRevision(local) != WakuRecovery.historyRevision(remote)) return local
         val values = local.toMutableMap()
         val source = if (fullSnapshot) withFallback(remote) else remote
         source["title"]?.let { values["title"] = it }
@@ -27,6 +28,7 @@ object WakuSessionTitles {
 
     fun needsDetails(local: JsonObject?, summary: JsonObject): Boolean {
         if (local == null) return explicit(summary) == null && automatic(summary) == null
+        if (WakuRecovery.historyRevision(local) != WakuRecovery.historyRevision(summary)) return false
         return automatic(local) != automatic(summary) ||
             (explicit(local) == null && automatic(local) == null && fromHistory(local) == null)
     }
@@ -45,6 +47,10 @@ object WakuSessionTitles {
         val source = visible?.takeIf { it.isNotBlank() }
             ?: message.array("attachments").filterIsInstance<JsonObject>().firstNotNullOfOrNull { label(it, "name") }
             ?: return null
+        return summarize(source)
+    }
+
+    internal fun summarize(source: String): String? {
         val title = source.splitToSequence(Regex("[\\s\\p{Z}]+")).filter(String::isNotBlank).take(7).joinToString(" ").trim()
         if (title.isEmpty()) return null
         // Match the desktop's 54 Unicode code-point limit without splitting emoji surrogates.

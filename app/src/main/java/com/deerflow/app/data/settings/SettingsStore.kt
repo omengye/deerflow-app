@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.distinctUntilChanged
+import com.deerflow.app.data.oss.S3Settings
+import kotlinx.serialization.json.Json
 
 private val Context.dataStore by preferencesDataStore(
     name = "deerflow_settings",
@@ -60,6 +62,7 @@ data class AppSettings(
 
 /** Token plaintext exists only in memory; preferences contain an Android Keystore encrypted value. */
 class SettingsStore(private val context: Context) {
+    private val ossCipherKey = stringPreferencesKey("oss_credentials_encrypted_v1")
     private val endpointKey = stringPreferencesKey("endpoint")
     private val tokenCipherKey = stringPreferencesKey("waku_token_encrypted_v1")
     private val workspaceKey = stringPreferencesKey("waku_workspace")
@@ -85,13 +88,34 @@ class SettingsStore(private val context: Context) {
 
     suspend fun current(): AppSettings = flow.first()
 
+    /** Separate flow: editing OSS credentials must not restart a Waku connection. */
+    val ossFlow: Flow<S3Settings> = context.dataStore.data.map { prefs ->
+        val encrypted = prefs[ossCipherKey]
+        if (encrypted == null) S3Settings() else runCatching {
+            Json.decodeFromString(S3Settings.serializer(), TokenCipher.decrypt(encrypted))
+        }.getOrElse { S3Settings() }
+    }.distinctUntilChanged()
+
+    suspend fun currentOss(): S3Settings = ossFlow.first()
+
+    suspend fun saveOss(settings: S3Settings) {
+        require(settings.validationError == null) { settings.validationError.orEmpty() }
+        val encrypted = TokenCipher.encrypt(Json.encodeToString(S3Settings.serializer(), settings))
+        context.dataStore.edit { it[ossCipherKey] = encrypted }
+    }
+
     private fun memoryKey(endpoint: String) = stringPreferencesKey("memory_pending_" +
         java.security.MessageDigest.getInstance("SHA-256").digest(endpoint.trim().toByteArray())
             .joinToString("") { "%02x".format(it) })
 
     suspend fun pendingMemory(endpoint: String): com.deerflow.app.data.memory.MemoryOperation? {
         val cipher = context.dataStore.data.first()[memoryKey(endpoint)] ?: return null
-        return com.deerflow.app.data.memory.MemoryJson.decodeFromString(TokenCipher.decrypt(cipher))
+        return runCatching {
+            com.deerflow.app.data.memory.MemoryJson.decodeFromString<com.deerflow.app.data.memory.MemoryOperation>(TokenCipher.decrypt(cipher))
+        }.getOrElse {
+            savePendingMemory(endpoint, null)
+            null
+        }
     }
 
     suspend fun savePendingMemory(endpoint: String, operation: com.deerflow.app.data.memory.MemoryOperation?) {

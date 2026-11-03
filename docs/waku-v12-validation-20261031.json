@@ -1,0 +1,40 @@
+{
+  "date": "2026-10-31",
+  "version": "2.2.0",
+  "version_code": 10,
+  "server_protocol": 12,
+  "protocol_source": "D:/Tools/deerflow-api/desktop-app/crates/waku-protocol",
+  "protocol_source_commit": "fe4c659c",
+  "android": {
+    "tests": 183,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "lint": {
+    "errors": 0,
+    "warnings": 21
+  },
+  "build_command": "gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain",
+  "gradle": "9.5.1",
+  "jdk": "25.0.3",
+  "compile_sdk": 36,
+  "apk": "dist/deerflow-2.2.0-waku-v12.apk",
+  "apk_sha256": "e8e5b733326553972a1a24f6f6246540e4299658b07a9ccbef4a7b92fbe83107",
+  "signature_v2_verified": true,
+  "same_signing_certificate_as_2_1_2": true,
+  "signing_certificate_sha256": "46a49b636823458834c1be62bebd379f10533c275ef3c7f54ba7e1ab8179b6d5",
+  "physical_android_device_tested": false,
+  "actual_server_integration_tested": false,
+  "server_workspace_modified": false,
+  "capabilities": [
+    "v12 handshake and permanent v10/v11 rejection",
+    "revision-aware history hydration and stale snapshot isolation",
+    "pending history recovery state persisted and blocks submissions",
+    "current task artifact authority restored directly from attach",
+    "replayed Ready cannot replace attach authority; invalidation revokes cached authority",
+    "desktop steering updates use stable message identity"
+  ],
+  "ui_scope": "Existing mobile features adapted to v12. No new fork, rewind, steering submission or budget editing controls.",
+  "known_regression": "2.2.0 incorrectly treated task-data invalidated as capability revocation. Corrected in 2.2.1; see artifact-fix-validation-20261031.json. Original test results are historical."
+}

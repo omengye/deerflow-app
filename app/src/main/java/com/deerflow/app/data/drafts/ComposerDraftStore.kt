@@ -15,7 +15,7 @@ import kotlinx.serialization.json.Json
 import kotlin.coroutines.coroutineContext
 
 @Serializable
-data class DraftAttachment(val uri: String, val displayName: String, val mimeType: String? = null, val sizeBytes: Long? = null)
+data class DraftAttachment(val uri: String, val displayName: String, val mimeType: String? = null, val sizeBytes: Long? = null, val uploadToOss: Boolean = false)
 
 @Serializable
 data class ComposerDraft(val text: String = "", val attachments: List<DraftAttachment> = emptyList())

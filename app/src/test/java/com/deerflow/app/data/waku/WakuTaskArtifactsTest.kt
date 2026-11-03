@@ -20,6 +20,24 @@ class WakuTaskArtifactsTest {
     private val runtime = "20000000-0000-0000-0000-000000000001"
     private val epoch = "30000000-0000-0000-0000-000000000001"
 
+    @Test fun listingDoesNotReadFileBodiesAndSelectedDownloadVerifiesContent() = runBlocking {
+        val fixture = Fixture(temporary.newFolder())
+        val listed = fixture.helper.listArtifacts(session, runtime)
+        assertEquals(1, listed.size)
+        assertEquals("", listed.single().url)
+        assertTrue(fixture.actions.none { it.text("kind") == "artifactRead" })
+        assertTrue(fixture.directory.walkTopDown().none { it.isFile })
+        val downloaded = fixture.helper.loadArtifact(session, runtime, listed.single().path)
+        assertArrayEquals(fixture.bytes, File(java.net.URI(downloaded.url)).readBytes())
+        assertTrue(fixture.actions.any { it.text("kind") == "artifactRead" })
+    }
+
+    @Test fun selectedDownloadCannotReadAnUnlistedArtifact() = runBlocking {
+        val fixture = Fixture(temporary.newFolder())
+        assertTrue(runCatching { fixture.helper.loadArtifact(session, runtime, "waku:other/task/file") }.isFailure)
+        assertTrue(fixture.actions.none { it.text("kind") == "artifactRead" })
+    }
+
     @Test
     fun correlatedRepliesDownloadPinnedChunksIntoSafeCache() = runBlocking {
         val fixture = Fixture(temporary.newFolder())
@@ -58,6 +76,105 @@ class WakuTaskArtifactsTest {
         assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
         assertEquals(1, fixture.replayRequests)
         assertTrue(fixture.actions.none { it.text("kind") in setOf("executionResume", "resume") })
+    }
+
+    @Test fun v12AttachReadyAvoidsReplayingHistoryToReadArtifacts() = runBlocking {
+        val fixture = Fixture(temporary.newFolder(), initiallyReady = false)
+        fixture.helper.onAttached(session, WakuRuntimeAttachment(runtime, true, fixture.ready, null))
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(0, fixture.replayRequests)
+    }
+
+    @Test fun oldReplayedReadyCannotReplaceCurrentAttachAuthority() = runBlocking {
+        val fixture = Fixture(temporary.newFolder(), initiallyReady = false)
+        fixture.helper.onAttached(session, WakuRuntimeAttachment(runtime, true, fixture.ready, null))
+        fixture.helper.onWireEvent(artifactWire(fixture.ready.updated("connectionId" to JsonPrimitive("obsolete")), 1), replayed = true)
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(0, fixture.replayRequests)
+    }
+
+    @Test fun liveReadySupersedesAnOlderAttachResponse() = runBlocking {
+        val fixture = Fixture(temporary.newFolder())
+        val obsolete = fixture.ready.updated("connectionId" to JsonPrimitive("obsolete"))
+        fixture.helper.onAttached(session, WakuRuntimeAttachment(runtime, true, obsolete, null))
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(0, fixture.replayRequests)
+    }
+
+    @Test fun newLiveReadyCanReplaceAttachAuthority() = runBlocking {
+        val fixture = Fixture(temporary.newFolder(), initiallyReady = false)
+        fixture.helper.onAttached(session, WakuRuntimeAttachment(runtime, true,
+            fixture.ready.updated("connectionId" to JsonPrimitive("obsolete")), null))
+        fixture.helper.onWireEvent(artifactWire(fixture.ready, 2))
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(0, fixture.replayRequests)
+    }
+
+    @Test fun normalPromptCompletionKeepsTheArtifactConnectionUsable() = runBlocking {
+        val fixture = Fixture(temporary.newFolder())
+        // This order matches the ACP prompt completion callback in the server.
+        fixture.helper.onWireEvent(artifactWire(fixture.ready.updated("kind" to JsonPrimitive("invalidated")), ++fixture.sequence))
+        fixture.helper.onWireEvent(driverWire("turnFinished", buildJsonObject { put("success", true) }, ++fixture.sequence))
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(0, fixture.replayRequests)
+        assertEquals(listOf("list", "artifactList", "artifactRead", "artifactRead", "artifactRead"), fixture.actions.map { it.text("kind") })
+    }
+
+    @Test fun replayAfterReconnectRetainsReadyAcrossNormalTaskInvalidations() = runBlocking {
+        val fixture = Fixture(temporary.newFolder(), initiallyReady = false)
+        fixture.replayEvents = listOf(artifactWire(fixture.ready, 1),
+            artifactWire(fixture.ready.updated("kind" to JsonPrimitive("invalidated")), 2),
+            driverWire("turnFinished", buildJsonObject { put("success", true) }, 3))
+        fixture.sequence = 3
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(1, fixture.replayRequests)
+    }
+
+    @Test fun aCompletedCursorWithReadyDeletedBy220RecoversTheOriginalAnnouncement() = runBlocking {
+        val oldCheckpoint = WakuControlCheckpoint(WakuReplayPosition(runtime, epoch, 3), taskReady = null)
+        val fixture = Fixture(temporary.newFolder(), initiallyReady = false, cachedCheckpoint = oldCheckpoint)
+        fixture.replayEvents = listOf(artifactWire(fixture.ready, 1),
+            artifactWire(fixture.ready.updated("kind" to JsonPrimitive("invalidated")), 2),
+            driverWire("turnFinished", buildJsonObject { put("success", true) }, 3))
+        fixture.sequence = 3
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(listOf(3L, 0L), fixture.replayedAfter)
+        assertEquals(fixture.replayEvents.first(), fixture.savedCheckpoints.last().taskReady)
+    }
+
+    @Test fun invalidationDuringAReadStillAllowsItsCorrelatedReply() = runBlocking {
+        val fixture = Fixture(temporary.newFolder(), invalidateBeforeReply = true)
+        assertEquals(1, fixture.helper.loadArtifacts(session, runtime).size)
+        assertEquals(0, fixture.replayRequests)
+    }
+
+    @Test fun aConversationWithNoArtifactsCompletesTheReadNormally() = runBlocking {
+        val fixture = Fixture(temporary.newFolder(), noArtifacts = true)
+        fixture.helper.onWireEvent(artifactWire(fixture.ready.updated("kind" to JsonPrimitive("invalidated")), ++fixture.sequence))
+        assertTrue(fixture.helper.loadArtifacts(session, runtime).isEmpty())
+        assertEquals(listOf("list", "artifactList"), fixture.actions.map { it.text("kind") })
+        assertEquals(0, fixture.replayRequests)
+    }
+
+    @Test fun processExitEndsReadsAndOldReadyCannotRestoreThatRuntime() = runBlocking {
+        val fixture = Fixture(temporary.newFolder())
+        fixture.helper.onWireEvent(driverWire("processExited", JsonNull, ++fixture.sequence))
+        fixture.helper.onAttached(session, WakuRuntimeAttachment(runtime, true, fixture.ready, null))
+        fixture.helper.onWireEvent(artifactWire(fixture.ready, 1), replayed = true)
+        val failure = runCatching { fixture.helper.loadArtifacts(session, runtime) }.exceptionOrNull()
+        assertTrue(failure?.message.orEmpty().contains("运行时已结束"))
+        assertTrue(fixture.actions.isEmpty())
+        assertEquals(0, fixture.replayRequests)
+    }
+
+    private fun driverWire(kind: String, payload: JsonElement, sequence: Long) = buildJsonObject {
+        put("type", "event"); put("sessionId", session); put("runtimeId", runtime); put("epoch", epoch); put("sequence", sequence)
+        put("event", buildJsonObject { put("kind", kind); put("payload", payload) })
+    }
+
+    private fun artifactWire(payload: JsonObject, sequence: Long) = buildJsonObject {
+        put("type", "event"); put("sessionId", session); put("runtimeId", runtime); put("epoch", epoch); put("sequence", sequence)
+        put("event", buildJsonObject { put("kind", "deerflowTasks"); put("payload", payload) })
     }
 
     @Test
@@ -187,6 +304,9 @@ class WakuTaskArtifactsTest {
         val cancelBeforeOffset: Long? = null,
         val failureCode: String? = null,
         var failuresRemaining: Int = 1,
+        val noArtifacts: Boolean = false,
+        val invalidateBeforeReply: Boolean = false,
+        val cachedCheckpoint: WakuControlCheckpoint? = null,
     ) {
         val bytes = "hello world".toByteArray()
         val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it.toInt() and 255) }
@@ -195,12 +315,17 @@ class WakuTaskArtifactsTest {
         private var droppedOffset = false
         val admitted = kotlinx.coroutines.CompletableDeferred<Unit>()
         var replayRequests = 0
+        val replayedAfter = mutableListOf<Long>()
+        val savedCheckpoints = mutableListOf<WakuControlCheckpoint>()
         var sequence = 1L
         val ready = objectOf("kind" to JsonPrimitive("ready"), "connectionId" to JsonPrimitive("connection-1"), "sessionId" to JsonPrimitive("acp-1"),
             "capabilities" to objectOf("tree" to JsonPrimitive(true), "artifactList" to JsonPrimitive(true), "artifactRead" to JsonPrimitive(true)))
+        var replayEvents = listOf(artifactWire(ready, 1))
         val metadata = objectOf("id" to JsonPrimitive("asset-1"), "name" to JsonPrimitive("../../secret.txt"), "mimeType" to JsonPrimitive("text/plain"), "size" to JsonPrimitive(bytes.size))
         val helper = WakuTaskArtifacts(directory, maxFileBytes = maxFileBytes, maxTotalBytes = maxOf(2048, maxFileBytes), chunkBytes = 4,
             requestTimeoutMs = 300, retryDelayMs = 5,
+            readCheckpoint = { _, _ -> cachedCheckpoint },
+            saveCheckpoint = { _, checkpoint -> savedCheckpoints += checkpoint },
             beforeRead = {
                 if (cancelBeforeOffset != null && actions.any { it.text("kind") == "artifactRead" && it.long("offset") + 4 >= cancelBeforeOffset }) {
                     throw CancellationException("会话已切换")
@@ -210,9 +335,11 @@ class WakuTaskArtifactsTest {
             assertEquals(session, sid); assertEquals(runtime, rid)
             if (command.text("type") == "replayEvents") {
                 replayRequests++
+                replayedAfter += command.long("afterSequence")
                 if (loseReplayOnce && replayRequests == 1) throw WakuRequestException(WakuDelivery.RESULT_UNKNOWN, "replay-read", "generic unknown result")
-                objectOf("type" to JsonPrimitive("replayEvents"), "epoch" to JsonPrimitive(epoch), "throughSequence" to JsonPrimitive(1),
-                    "nextSequence" to JsonPrimitive(1), "hasMore" to JsonPrimitive(false), "events" to JsonArray(listOf(wire(ready, 1))))
+                val through = replayEvents.last().long("sequence")
+                objectOf("type" to JsonPrimitive("replayEvents"), "epoch" to JsonPrimitive(epoch), "throughSequence" to JsonPrimitive(through),
+                    "nextSequence" to JsonPrimitive(through), "hasMore" to JsonPrimitive(false), "events" to JsonArray(replayEvents.filter { it.long("sequence") > command.long("afterSequence") }))
             } else {
                 assertEquals("deerFlowTasks", command.text("type"))
                 val control = command["command"]!!.jsonObject
@@ -233,6 +360,7 @@ class WakuTaskArtifactsTest {
         init { if (initiallyReady) helper.onWireEvent(wire(ready, 1)) }
 
         private fun answerControl(command: JsonObject, action: JsonObject) {
+            if (invalidateBeforeReply) helper.onWireEvent(wire(ready.updated("kind" to JsonPrimitive("invalidated")), ++sequence))
             if (failureCode != null && failuresRemaining-- > 0) {
                 helper.onWireEvent(wire(objectOf("kind" to JsonPrimitive("failed"), "command" to command,
                     "code" to JsonPrimitive(failureCode), "message" to JsonPrimitive("synthetic failure")), ++sequence))
@@ -254,7 +382,7 @@ class WakuTaskArtifactsTest {
                 "artifactList" -> {
                     kind = "artifacts"
                     data = objectOf("rootId" to JsonPrimitive("root-1"), "nodeId" to JsonPrimitive("root/root-1"),
-                        "hasMore" to JsonPrimitive(false), "artifacts" to JsonArray(if (failSecondArtifact) listOf(metadata,
+                        "hasMore" to JsonPrimitive(false), "artifacts" to JsonArray(if (noArtifacts) emptyList() else if (failSecondArtifact) listOf(metadata,
                             JsonObject(metadata.toMutableMap().apply { put("id", JsonPrimitive("asset-2")) })) else listOf(metadata)))
                 }
                 else -> {

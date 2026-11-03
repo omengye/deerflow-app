@@ -62,7 +62,7 @@ class WakuReplayRunner(private val pageSize: Int = 64, private val pageTimeoutMs
     }
 }
 
-/** Separate checkpoint for v10 control history, which a hydrated transcript does not contain. */
+/** Separate checkpoint for control history, which a hydrated v12 transcript does not contain. */
 @Serializable
 data class WakuControlCheckpoint(
     val position: WakuReplayPosition? = null,
@@ -81,7 +81,8 @@ data class WakuControlCheckpoint(
             when (event.string("kind")) {
                 "permission" -> if (payload?.string("requestId") != null) permissions = permissions.filterNot { it.string("requestId") == payload.string("requestId") } + payload
                 "userInputRequested" -> if (payload?.string("requestId") != null) questions = questions.filterNot { it.string("requestId") == payload.string("requestId") } + payload
-                "promptSubmitted", "turnStarted", "turnFinished", "processExited" -> { permissions = emptyList(); questions = emptyList() }
+                "promptSubmitted", "turnStarted", "turnFinished" -> { permissions = emptyList(); questions = emptyList() }
+                "processExited" -> { permissions = emptyList(); questions = emptyList(); ready = null }
                 "permissionResolved" -> permissions = permissions.filterNot { it.string("requestId") == payload?.string("requestId") }
                 "userInputResolved" -> questions = questions.filterNot { it.string("requestId") == payload?.string("requestId") }
                 "deerflowTasks" -> if (payload?.string("kind") == "ready") ready = wire

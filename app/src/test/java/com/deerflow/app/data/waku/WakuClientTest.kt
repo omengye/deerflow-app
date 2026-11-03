@@ -114,7 +114,7 @@ class WakuClientTest {
         val socket = factory.sockets.single()
         val hello = socket.sent.first().json()
         assertEquals("hello", hello["type"]!!.jsonPrimitive.content)
-        assertEquals("10", hello["protocolVersion"]!!.jsonPrimitive.content)
+        assertEquals("12", hello["protocolVersion"]!!.jsonPrimitive.content)
         assertEquals(clientId, hello["clientId"]!!.jsonPrimitive.content)
         assertEquals("[]", hello["resumeFrom"].toString())
         val result = async { client.request(wakuCommand("listTasks"), requestId = requestId) }
@@ -134,7 +134,9 @@ class WakuClientTest {
     fun authenticationAndProtocolRejectionsArePermanent() = runBlocking {
         for (reply in listOf(
             """{"type":"rejected","message":"invalid token"}""",
-            """{"type":"hello","protocolVersion":9,"daemonVersion":"test"}""",
+            """{"type":"hello","protocolVersion":10,"daemonVersion":"test"}""",
+            """{"type":"hello","protocolVersion":11,"daemonVersion":"test"}""",
+            """{"type":"hello","protocolVersion":13,"daemonVersion":"test"}""",
         )) {
             val factory = FakeFactory()
             val client = client(factory)
@@ -327,7 +329,7 @@ class WakuClientTest {
             this,
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(101).message("Switching Protocols").build(),
         )
-        fun hello() = message("""{"type":"hello","protocolVersion":10,"daemonVersion":"test"}""")
+        fun hello() = message("""{"type":"hello","protocolVersion":12,"daemonVersion":"test"}""")
         fun message(text: String) = listener.onMessage(this, text)
         fun failure() = listener.onFailure(this, IOException("network unavailable"), null)
     }

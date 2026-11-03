@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
@@ -55,6 +57,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.InputChip
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
@@ -96,6 +99,7 @@ import com.deerflow.app.R
 import com.deerflow.app.data.PendingAttachment
 import com.deerflow.app.data.proposal.SkillProposal
 import com.deerflow.app.domain.ConversationState
+import com.deerflow.app.domain.model.ThreadMeta
 import com.deerflow.app.ui.proposal.ProposalCard
 import com.deerflow.app.ui.proposal.ProposalViewModel
 import kotlinx.coroutines.launch
@@ -132,12 +136,23 @@ fun ChatScreen(
     val draftKey = profileKey + "|" + state.threadId
     val draft = composer.drafts[draftKey] ?: ComposerDraft()
     val draftReady = draftKey in composer.loaded && profileKey.isNotBlank()
-    val attachments = draft.attachments.map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes) }
+    val attachments = draft.attachments.map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes, it.uploadToOss) }
+    val taskFiles by vm.taskFiles.collectAsStateWithLifecycle()
+    val transcriptListState = rememberLazyListState()
+    val transcriptItemCount = remember(state.threadId) { mutableStateOf(0) }
+    var filesVisible by rememberSaveable(state.threadId) { mutableStateOf(false) }
+    if (filesVisible) {
+        ArtifactsScreen(state = taskFiles, onBack = { filesVisible = false }, onRefresh = { vm.refreshArtifacts() },
+            resolve = { vm.resolveArtifact(it, state.threadId) })
+        return
+    }
     val unavailableAttachments = composer.unavailable[draftKey].orEmpty()
     val draftError = composer.errors[draftKey]
     var pendingCameraUri by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingCameraName by rememberSaveable { mutableStateOf("") }
     var pickerDraftKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var renameThreadMeta by remember { mutableStateOf<ThreadMeta?>(null) }
+    var renameText by remember { mutableStateOf("") }
     LaunchedEffect(draftKey) { vm.loadDraft(draftKey) }
     val threadProposals = remember(proposalState.proposals, state.threadId) {
         proposalState.proposals
@@ -259,6 +274,22 @@ fun ChatScreen(
                                             .background(scheme.primary, CircleShape)
                                     )
                                 }
+                                if (!meta.id.startsWith("legacy:")) {
+                                    IconButton(
+                                        onClick = {
+                                            renameThreadMeta = meta
+                                            renameText = meta.title
+                                        },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = "Rename thread",
+                                            tint = scheme.onSurface.copy(alpha = 0.4f),
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
                                 IconButton(
                                     onClick = { vm.deleteThread(meta.id) },
                                     modifier = Modifier.size(24.dp)
@@ -300,6 +331,9 @@ fun ChatScreen(
                         }
                     },
                     actions = {
+                        TextButton(onClick = { filesVisible = true; vm.refreshArtifacts() }) {
+                            Text(if (taskFiles.files.isEmpty()) "产物" else "产物 ${taskFiles.files.size}")
+                        }
                         IconButton(onClick = vm::refresh) {
                             Icon(Icons.Default.Refresh, contentDescription = "重新同步会话和产物")
                         }
@@ -319,13 +353,16 @@ fun ChatScreen(
                         .background(scheme.background)
                         .imePadding()
                 ) {
-                    if (!connected || unknownSubmission != null) {
+                    val hasConnectionNotice = !connected || (connection.isNotBlank() && connection != "已连接" && unknownSubmission?.contains(connection) != true)
+                    if (hasConnectionNotice || unknownSubmission != null) {
                         Column(Modifier.fillMaxWidth().background(scheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp)) {
-                            if (!connected) {
+                            if (hasConnectionNotice) {
                                 Text(connection, style = MaterialTheme.typography.bodySmall)
-                                Row {
-                                    TextButton(onClick = vm::refresh) { Text("重新同步") }
-                                    TextButton(onClick = onOpenSettings) { Text("连接设置") }
+                                if (!connected) {
+                                    Row {
+                                        TextButton(onClick = vm::refresh) { Text("重新同步") }
+                                        TextButton(onClick = onOpenSettings) { Text("连接设置") }
+                                    }
                                 }
                             }
                             unknownSubmission?.let { pending ->
@@ -333,7 +370,8 @@ fun ChatScreen(
                                 Text(pending, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                                 Row {
                                     TextButton(onClick = { clipboard.setText(AnnotatedString(pending)) }) { Text("复制原文") }
-                                    TextButton(onClick = { vm.acknowledgeUnknown(); reviewReset++ }) { Text("已核对执行结果，解除发送锁定") }
+                                    TextButton(onClick = { vm.restorePendingToDraft(draftKey) }) { Text("恢复到输入框") }
+                                    TextButton(onClick = { vm.acknowledgeUnknown(); reviewReset++ }) { Text("解除锁定") }
                                 }
                             }
                         }
@@ -364,6 +402,7 @@ fun ChatScreen(
                         text = draft.text,
                         onTextChanged = { vm.updateDraftText(draftKey, it) },
                         attachments = attachments,
+                        onOssChanged = { vm.setDraftOss(draftKey, it) },
                         onSubmit = { text, files ->
                             val accepted = vm.submit(text, files, draftKey)
 
@@ -376,7 +415,14 @@ fun ChatScreen(
                                 pendingCameraUri = pending.uri.toString()
                                 pendingCameraName = pending.displayName
                                 pickerDraftKey = draftKey
-                                cameraLauncher.launch(pending.uri)
+                                try {
+                                    cameraLauncher.launch(pending.uri)
+                                } catch (_: ActivityNotFoundException) {
+                                    Toast.makeText(context, "未找到相机应用", Toast.LENGTH_SHORT).show()
+                                    pendingCameraUri = null
+                                    pendingCameraName = ""
+                                    pickerDraftKey = null
+                                }
                             }
                         },
                         onRemoveAttachment = { attachment ->
@@ -388,7 +434,10 @@ fun ChatScreen(
         ) { padding ->
             Transcript(
                 state = state,
+                listState = transcriptListState,
+                itemCount = transcriptItemCount,
                 artifactHeaders = artifactHeaders,
+                resolveMessageFile = { vm.resolveMessageFile(it, state.threadId) },
                 proposals = threadProposals,
                 actionProposalId = proposalState.actionProposalId,
                 onViewProposal = { proposalId ->
@@ -400,6 +449,40 @@ fun ChatScreen(
                 modifier = Modifier.padding(padding),
             )
         }
+    }
+
+    if (renameThreadMeta != null) {
+        AlertDialog(
+            onDismissRequest = { renameThreadMeta = null },
+            title = { Text("重命名会话") },
+            text = {
+                OutlinedTextField(
+                    value = renameText,
+                    onValueChange = { renameText = it },
+                    label = { Text("会话标题") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val target = renameThreadMeta
+                        if (target != null && renameText.isNotBlank()) {
+                            vm.renameThread(target.id, renameText.trim())
+                        }
+                        renameThreadMeta = null
+                    }
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameThreadMeta = null }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }
 
@@ -416,7 +499,10 @@ private sealed class TranscriptItem {
 @Composable
 private fun Transcript(
     state: ConversationState,
+    listState: androidx.compose.foundation.lazy.LazyListState,
+    itemCount: androidx.compose.runtime.MutableState<Int>,
     artifactHeaders: Map<String, String>,
+    resolveMessageFile: suspend (com.deerflow.app.domain.model.MessageFile) -> com.deerflow.app.domain.model.AgentArtifact,
     proposals: List<SkillProposal>,
     actionProposalId: String?,
     onViewProposal: (String) -> Unit,
@@ -424,8 +510,7 @@ private fun Transcript(
     onRejectProposal: (String, String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val listState = rememberLazyListState()
-    var previousItemCount by remember(state.threadId) { mutableStateOf(0) }
+    var previousItemCount by itemCount
 
     // Map each proposal ID to its anchor block index when first introduced in this thread session.
     val proposalAnchors = remember(state.threadId) { mutableMapOf<String, Int>() }
@@ -507,6 +592,7 @@ private fun Transcript(
                         block = item.block,
                         artifactHeaders = artifactHeaders,
                         isStreaming = isStreaming,
+                        resolveMessageFile = resolveMessageFile,
                     )
                 }
                 is TranscriptItem.ProposalItem -> ProposalCard(
@@ -598,6 +684,7 @@ private fun InputBar(
     text: String,
     onTextChanged: (String) -> Unit,
     attachments: List<PendingAttachment>,
+    onOssChanged: (Boolean) -> Unit,
     onSubmit: (String, List<PendingAttachment>) -> Boolean,
     onCancel: () -> Unit,
     onPickFiles: () -> Unit,
@@ -673,6 +760,13 @@ private fun InputBar(
                 onRemoveAttachment = onRemoveAttachment,
                 modifier = Modifier.padding(bottom = 8.dp),
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("上传到", style = MaterialTheme.typography.labelMedium)
+                FilterChip(selected = attachments.none { it.uploadToOss }, onClick = { onOssChanged(false) },
+                    enabled = editable && !running, label = { Text("服务器") })
+                FilterChip(selected = attachments.all { it.uploadToOss }, onClick = { onOssChanged(true) },
+                    enabled = editable && !running, label = { Text("OSS") })
+            }
         }
 
         Row(

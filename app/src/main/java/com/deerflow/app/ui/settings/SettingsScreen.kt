@@ -2,7 +2,9 @@ package com.deerflow.app.ui.settings
 
 import androidx.activity.compose.BackHandler
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +41,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 @Composable
 fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
     var memoryVisible by rememberSaveable { mutableStateOf(false) }
+    var ossVisible by rememberSaveable { mutableStateOf(false) }
+    if (ossVisible) { OssSettingsScreen(onBack = { ossVisible = false }); return }
     if (memoryVisible) { MemoryScreen(onBack = { memoryVisible = false }); return }
     val state by vm.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -77,12 +81,24 @@ fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
                 supportingText = { Text("留空跟随后端默认。填写服务器已配置的模型 ID，保存后在新会话生效。") },
                 singleLine = true, modifier = Modifier.fillMaxWidth())
             TextButton(onClick = { memoryVisible = true }, enabled = enabled) { Text("个人记忆") }
+            TextButton(onClick = { ossVisible = true }, enabled = enabled) { Text("OSS 附件存储") }
             Text("后台连接", style = MaterialTheme.typography.titleSmall)
             Text("任务执行时持续接收进度与待处理提醒；空闲时切到后台 60 秒后暂停。可在通知栏暂停后台接收。",
                 style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = {
-                context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName))
+                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                try {
+                    context.startActivity(intent)
+                } catch (_: Exception) {
+                    try {
+                        context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", context.packageName, null)
+                        })
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "无法打开系统设置", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }) { Text("通知设置") }
             Text("工具权限：Full Access", style = MaterialTheme.typography.titleSmall)
             Text("普通工具自动授权。已有会话在发送下一条消息前应用；服务器要求的特殊审批仍会显示。",

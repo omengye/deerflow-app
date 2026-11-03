@@ -8,4 +8,5 @@ data class PendingAttachment(
     val displayName: String,
     val mimeType: String?,
     val sizeBytes: Long?,
+    val uploadToOss: Boolean = false,
 )

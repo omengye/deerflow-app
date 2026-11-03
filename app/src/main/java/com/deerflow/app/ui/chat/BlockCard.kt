@@ -50,7 +50,8 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Card
@@ -97,6 +98,7 @@ import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
 import com.deerflow.app.domain.UserDisplayText
 import com.deerflow.app.domain.model.AgentArtifact
+import com.deerflow.app.domain.model.MessageFile
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -112,6 +114,7 @@ fun BlockCard(
     modifier: Modifier = Modifier,
     artifactHeaders: Map<String, String> = emptyMap(),
     isStreaming: Boolean = false,
+    resolveMessageFile: (suspend (MessageFile) -> AgentArtifact)? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
 
@@ -136,6 +139,11 @@ fun BlockCard(
                             textColor = scheme.onPrimaryContainer,
                             artifactHeaders = artifactHeaders,
                         )
+                        block.attachments.forEach { file ->
+                            Spacer(Modifier.height(6.dp))
+                            ArtifactCard(file.asArtifact(), autoPreview = file.isImage,
+                                resolve = resolveMessageFile?.let { resolver -> { resolver(file) } })
+                        }
                     }
                 }
             }
@@ -373,178 +381,124 @@ fun BlockCard(
 }
 
 @Composable
-private fun ArtifactCard(artifact: AgentArtifact, headers: Map<String, String>) {
+internal fun ArtifactCard(
+    artifact: AgentArtifact,
+    headers: Map<String, String> = emptyMap(),
+    autoPreview: Boolean = false,
+    resolve: (suspend () -> AgentArtifact)? = null,
+) {
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var previewOpen by remember { mutableStateOf(false) }
-    var opening by remember { mutableStateOf(false) }
-    var downloading by remember { mutableStateOf(false) }
-    var downloadProgress: Float? by remember { mutableStateOf<Float?>(null) }
+    var resolved by remember(artifact.path, artifact.name, artifact.mimeType, artifact.size) { mutableStateOf<AgentArtifact?>(null) }
+    var previewOpen by remember(artifact.path) { mutableStateOf(false) }
+    var busy by remember(artifact.path) { mutableStateOf<String?>(null) }
+    var failure by remember(artifact.path) { mutableStateOf<String?>(null) }
     val isImage = artifact.kind == "image" || artifact.mimeType?.startsWith("image/") == true
 
-    fun openExternal() {
+    suspend fun content(): AgentArtifact {
+        resolved?.takeIf { cached ->
+            cached.url.isNotBlank() && (Uri.parse(cached.url).scheme != "file" || runCatching { checkedCacheFile(context, Uri.parse(cached.url)) }.isSuccess)
+        }?.let { return it }
+        return (resolve?.invoke() ?: artifact).also { resolved = it }
+    }
+    fun action(kind: String) {
+        if (busy != null) return
         scope.launch {
-            opening = true
-            val result = runCatching { downloadArtifact(context, artifact, headers) }
-            opening = false
-            result.onSuccess { uri ->
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, artifact.mimeType ?: "application/octet-stream")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            busy = kind; failure = null
+            try {
+                val file = content()
+                when (kind) {
+                    "预览中…" -> previewOpen = true
+                    "保存中…" -> {
+                        saveToDownloads(context, file.name, file.mimeType, file.url, headers) { }
+                        Toast.makeText(context, "已保存到 Download/deerflow/" + file.name, Toast.LENGTH_LONG).show()
+                    }
+                    "分享中…" -> {
+                        val uri = downloadArtifact(context, file, headers)
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = file.mimeType ?: "application/octet-stream"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        context.startActivity(Intent.createChooser(shareIntent, "分享产物：" + file.name))
+                    }
+                    else -> {
+                        val uri = downloadArtifact(context, file, headers)
+                        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, file.mimeType ?: "application/octet-stream")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        })
+                    }
                 }
-                try {
-                    context.startActivity(intent)
-                } catch (_: ActivityNotFoundException) {
-                    Toast.makeText(context, "No app can open this file", Toast.LENGTH_SHORT).show()
-                }
-            }.onFailure { error ->
-                Toast.makeText(context, "Open failed: ${error.message}", Toast.LENGTH_SHORT).show()
-            }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: ActivityNotFoundException) { failure = "没有可打开此文件的应用，请先保存文件" }
+            catch (error: Exception) { failure = error.message ?: "文件读取失败，请重试" }
+            finally { busy = null }
         }
     }
-
-    fun save() {
-        if (downloading) return
-        scope.launch {
-            downloading = true
-            downloadProgress = null
-            val result = runCatching {
-                saveToDownloads(
-                    context = context,
-                    displayName = artifact.name,
-                    mime = artifact.mimeType,
-                    url = artifact.url,
-                    authHeaders = headers,
-                    onProgress = { v -> downloadProgress = v },
-                )
-            }
-            downloading = false
-            downloadProgress = null
-            result.onSuccess {
-                Toast.makeText(context, "Saved to Download/deerflow/${artifact.name}", Toast.LENGTH_LONG).show()
-            }.onFailure { error ->
-                Toast.makeText(context, "Save failed: ${error.message}", Toast.LENGTH_LONG).show()
-            }
+    LaunchedEffect(artifact.path, artifact.url, autoPreview) {
+        if (autoPreview && isImage) {
+            try { content() }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { failure = "图片暂未加载，点击重试" }
         }
     }
-
+    val shown = resolved ?: artifact
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { if (isImage) previewOpen = true else openExternal() },
+        modifier = Modifier.fillMaxWidth().clickable(enabled = busy == null) {
+            action(if (isImage) "预览中…" else "打开中…")
+        },
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = scheme.secondary),
         border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.25f)),
     ) {
         Column(Modifier.padding(10.dp)) {
-            if (isImage) {
-                NetworkImage(
-                    model = authenticatedImageRequest(context, artifact.url, headers),
-                    contentDescription = artifact.name,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(180.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(scheme.surfaceVariant),
-                )
+            if (isImage && resolved != null) {
+                NetworkImage(model = authenticatedImageRequest(context, shown.url, headers),
+                    contentDescription = shown.name, contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(scheme.surfaceVariant))
                 Spacer(Modifier.height(8.dp))
             }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        imageVector = if (isImage) Icons.Default.Image else Icons.Default.AttachFile,
-                        contentDescription = null,
-                        tint = scheme.primary,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = artifact.name,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.Medium,
-                            color = scheme.onSecondary,
-                            maxLines = 1,
-                        )
-                        Text(
-                            text = when {
-                                downloading -> downloadProgress?.let { "Downloading... ${(it * 100).roundToInt()}%" } ?: "Downloading..."
-                                opening -> "Opening..."
-                                else -> artifact.mimeType ?: "file"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = scheme.onSecondary.copy(alpha = 0.65f),
-                            maxLines = 1,
-                        )
-                    }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (isImage) Icons.Default.Image else Icons.Default.AttachFile, null,
+                    tint = scheme.primary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(artifact.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(busy ?: listOfNotNull(artifact.mimeType, artifact.size?.let { formatFileSize(it) }).joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall)
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Download,
-                        contentDescription = "Save to Downloads",
-                        tint = scheme.onSecondary.copy(alpha = if (downloading) 0.3f else 0.7f),
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clickable { if (!downloading) save() },
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Icon(
-                        imageVector = Icons.Default.OpenInNew,
-                        contentDescription = "Open artifact",
-                        tint = scheme.onSecondary.copy(alpha = if (downloading) 0.3f else 0.7f),
-                        modifier = Modifier
-                            .size(22.dp)
-                            .clickable { if (!downloading) openExternal() },
-                    )
+                androidx.compose.material3.IconButton(onClick = { action("分享中…") }, enabled = busy == null) {
+                    Icon(Icons.Default.Share, "分享文件")
+                }
+                androidx.compose.material3.IconButton(onClick = { action("保存中…") }, enabled = busy == null) {
+                    Icon(Icons.Default.Download, "保存文件")
+                }
+                androidx.compose.material3.IconButton(onClick = { action(if (isImage) "预览中…" else "打开中…") }, enabled = busy == null) {
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, if (isImage) "预览图片" else "打开文件")
                 }
             }
-            if (downloading) {
-                Spacer(Modifier.height(8.dp))
-                if (downloadProgress == null) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                } else {
-                    LinearProgressIndicator(
-                        progress = { downloadProgress ?: 0f },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
+            if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth())
+            failure?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall) }
         }
     }
-
-    if (previewOpen && isImage) {
-        AlertDialog(
-            onDismissRequest = { previewOpen = false },
-            confirmButton = {
-                TextButton(onClick = { previewOpen = false }) { Text("Close") }
-            },
-            dismissButton = {
-                TextButton(onClick = { openExternal() }) { Text("Open") }
-            },
-            title = { Text(artifact.name, maxLines = 1) },
-            text = {
-                NetworkImage(
-                    model = authenticatedImageRequest(context, artifact.url, headers),
-                    contentDescription = artifact.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(360.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(scheme.surfaceVariant),
-                )
-            },
-        )
+    if (previewOpen && isImage && resolved != null) {
+        AlertDialog(onDismissRequest = { previewOpen = false },
+            confirmButton = { TextButton(onClick = { previewOpen = false }) { Text("关闭") } },
+            dismissButton = { TextButton(onClick = { action("打开中…") }) { Text("外部打开") } },
+            title = { Text(shown.name, maxLines = 2) },
+            text = { NetworkImage(model = authenticatedImageRequest(context, shown.url, headers),
+                contentDescription = shown.name, contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxWidth().height(360.dp)) })
     }
+}
+
+private fun formatFileSize(size: Long): String = when {
+    size >= 1024 * 1024 -> "%.1f MiB".format(size.toDouble() / (1024 * 1024))
+    size >= 1024 -> "%.1f KiB".format(size.toDouble() / 1024)
+    else -> "$size B"
 }
 
 private suspend fun downloadArtifact(
@@ -655,10 +609,11 @@ private suspend fun saveToDownloads(
         uri
     }
 }
-private fun guessMime(name: String): String =
-    MimeTypeMap.getSingleton()
-        .getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(name))
-        ?: "application/octet-stream"
+private fun guessMime(name: String): String {
+    val ext = name.substringAfterLast('.', "").trim().lowercase()
+    return if (ext.isNotEmpty()) MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
+    else "application/octet-stream"
+}
 
 @Composable
 private fun NetworkImage(
@@ -731,7 +686,7 @@ private fun authenticatedImageRequest(context: Context, url: String, headers: Ma
 }
 private fun sanitizeArtifactFilename(name: String): String {
     val clean = name.substringAfterLast('/').substringAfterLast('\\').trim()
-        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+        .replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim(' ', '.').take(60)
     return clean.ifEmpty { "artifact" }
 }
 

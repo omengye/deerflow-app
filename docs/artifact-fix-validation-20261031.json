@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-31",
+  "version": "2.2.1",
+  "version_code": 11,
+  "protocol_version": 12,
+  "apk": "dist/deerflow-2.2.1-artifact-fix.apk",
+  "apk_sha256": "ec5084485b87ff02c359e4a907961c6b75803d7b5a6def686e6dd07fb3b9abc5",
+  "android": {
+    "tests": 188,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "lint": {
+    "errors": 0,
+    "warnings": 21
+  },
+  "android_build_command": "gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain",
+  "signature_v2_verified": true,
+  "same_signing_certificate_as_2_2_0": true,
+  "signing_certificate_sha256": "46a49b636823458834c1be62bebd379f10533c275ef3c7f54ba7e1ab8179b6d5",
+  "server": {
+    "source": "D:/Tools/deerflow-api",
+    "base_commit": "fe4c659c",
+    "implementation": "desktop-app/crates/waku-core/src/daemon.rs",
+    "core_tests": {
+      "passed": 563,
+      "failed": 0,
+      "ignored": 37
+    },
+    "test_command": "cargo test -p waku-core --lib",
+    "deployed": false,
+    "build_command": "cargo build -p waku-daemon",
+    "build_passed": true,
+    "build_platform": "Windows x86_64, dev profile",
+    "binary": "D:/Tools/deerflow-api/desktop-app/target/debug/waku-daemon.exe",
+    "binary_sha256": "2fe2ea6add4a875f15dfc6922859e43952403035a5ed2eaa7c93f970f519a1c3"
+  },
+  "regression_reproduced_before_fix": true,
+  "regression_scenarios": [
+    "normal prompt: Ready, invalidated, turnFinished, successful artifact read",
+    "invalidation during a pending artifact read preserves its correlated reply",
+    "reconnect replay retains Ready across task data invalidation",
+    "2.2.0 saved control cursor without Ready recovers with one read-only rescan",
+    "empty artifact list completes normally",
+    "real runtime exit revokes reads and rejects stale Ready",
+    "replaced server runtime cannot overwrite or delete current Ready"
+  ],
+  "physical_android_device_tested": false,
+  "actual_server_integration_tested": false
+}

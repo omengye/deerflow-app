@@ -22,8 +22,9 @@ android {
         applicationId = "com.deerflow.app"
         minSdk = 30
         targetSdk = 36
-        versionCode = 9
-        versionName = "2.1.2"
+        versionCode = 13
+        versionName = "2.3.1"
+        testInstrumentationRunner = "com.deerflow.app.OssSmokeInstrumentation"
     }
 
     signingConfigs {

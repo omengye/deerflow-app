@@ -9,7 +9,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
-const val WAKU_PROTOCOL_VERSION = 10
+const val WAKU_PROTOCOL_VERSION = 12
 const val NIL_UUID = "00000000-0000-0000-0000-000000000000"
 internal const val MAX_WAKU_WIRE_BYTES = 48 * 1024 * 1024
 

@@ -8,12 +8,14 @@ package com.deerflow.app.domain
 object UserDisplayText {
     fun clean(raw: String): String {
         val normalized = normalizeText(raw)
-        val uploadBlocks = UPLOAD_BLOCK_REGEX.findAll(normalized).map { it.value }.toList()
-        val withoutUploadBlocks = UPLOAD_BLOCK_REGEX.replace(normalized, "")
+        val ossFiles = extractOssFileNames(normalized)
+        val withoutOss = OSS_ENVELOPE_REGEX.replace(normalized, "")
+        val uploadBlocks = UPLOAD_BLOCK_REGEX.findAll(withoutOss).map { it.value }.toList()
+        val withoutUploadBlocks = UPLOAD_BLOCK_REGEX.replace(withoutOss, "")
         val withoutInstructions = stripUploadInstructions(withoutUploadBlocks)
         val summaryText = normalizeAttachedFileText(withoutInstructions)
 
-        val files = (uploadBlocks.flatMap(::extractUploadFileNames) + extractAttachedSummaryFileNames(summaryText))
+        val files = (ossFiles + uploadBlocks.flatMap(::extractUploadFileNames) + extractAttachedSummaryFileNames(summaryText))
             .map(::cleanFileName)
             .filter { it.isNotEmpty() && !it.contains("/mnt/user-data/uploads/") }
             .distinct()
@@ -78,6 +80,13 @@ object UserDisplayText {
         return names
     }
 
+    private fun extractOssFileNames(text: String): List<String> {
+        val nameRegex = Regex("\"name\"\\s*:\\s*\"([^\"]+)\"")
+        return OSS_ENVELOPE_REGEX.findAll(text).flatMap { match ->
+            nameRegex.findAll(match.value).map { it.groupValues[1].trim() }
+        }.toList()
+    }
+
     private fun extractUploadFileNames(uploadBlock: String): List<String> {
         return UPLOAD_FILE_LINE_REGEX.findAll(uploadBlock)
             .map { it.groupValues[1].trim() }
@@ -103,12 +112,14 @@ object UserDisplayText {
     }
 
     private fun looksLikeUploadTurn(text: String): Boolean =
-        UPLOAD_BLOCK_REGEX.containsMatchIn(text) ||
+        OSS_ENVELOPE_REGEX.containsMatchIn(text) ||
+            UPLOAD_BLOCK_REGEX.containsMatchIn(text) ||
             ATTACHED_SUMMARY_REGEX.containsMatchIn(text) ||
             CHINESE_ATTACHED_SUMMARY_REGEX.containsMatchIn(text) ||
             DEFAULT_UPLOAD_PROMPTS.any { text.contains(it, ignoreCase = true) }
 
     private val INSTRUCTION_MARKERS = listOf(
+        Regex("(?i)请使用\\s+oss-attachments\\s+技能"),
         Regex("(?i)\\bRead\\s+(?:from\\s+)?the\\s+file\\s+first\\b"),
         Regex("(?i)\\bRead\\s+the\\s+file\\s+first\\b"),
         Regex("(?i)\\buse\\s+the\\s+outline\\s+line\\s+numbers\\b"),
@@ -127,6 +138,10 @@ object UserDisplayText {
         "Please analyze the uploaded file.",
     )
 
+    private val OSS_ENVELOPE_REGEX = Regex(
+        "\\[DEERFLOW_OSS_ATTACHMENTS_V1\\].*?\\[/DEERFLOW_OSS_ATTACHMENTS_V1\\]",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
+    )
     private val UPLOAD_BLOCK_REGEX = Regex(
         "<uploaded_files(?:_from_android)?>.*?</uploaded_files(?:_from_android)?>",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),

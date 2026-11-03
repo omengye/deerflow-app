@@ -13,9 +13,13 @@ object WakuRecovery {
 
     fun chooseSnapshot(local: WakuSnapshot?, remote: JsonObject): WakuSnapshot {
         if (local == null) return WakuProjection.fromSession(remote)
+        // A rewind changes the history independently of the runtime journal sequence.
+        // Never let a larger obsolete cursor resurrect the removed turns.
+        if (historyRevision(local.session) > historyRevision(remote)) return local
+        val sameHistory = historyRevision(local.session) == historyRevision(remote)
         val serverCursor = remote["runtime_event_cursor"] as? JsonObject
         val localCursor = local.session["runtime_event_cursor"] as? JsonObject
-        val sameStream = serverCursor != null && localCursor != null &&
+        val sameStream = sameHistory && serverCursor != null && localCursor != null &&
             serverCursor["epoch"] == localCursor["epoch"] &&
             serverCursor["runtime_id"] == localCursor["runtime_id"]
         val localAhead = localStreamAhead(local.session, remote)
@@ -34,10 +38,19 @@ object WakuRecovery {
             interactionReplay = if (sameStream) local.interactionReplay else null,
             artifactReplay = if (sameStream) local.artifactReplay else null,
             taskReady = if (samePosition) local.taskReady else null,
+            pendingHistory = local.pendingHistory,
+            sentMessages = local.sentMessages,
+            artifactFiles = if (sameHistory) local.artifactFiles else emptyList(),
         )
     }
 
+    fun historyRevision(session: JsonObject): Long = session.long("history_revision")
+
+    fun needsHistoryRefresh(local: JsonObject?, remote: JsonObject?): Boolean =
+        local != null && remote != null && historyRevision(local) < historyRevision(remote)
+
     internal fun localStreamAhead(local: JsonObject, remote: JsonObject): Boolean {
+        if (historyRevision(local) != historyRevision(remote)) return false
         val server = remote["runtime_event_cursor"] as? JsonObject ?: return false
         val cached = local["runtime_event_cursor"] as? JsonObject ?: return false
         return server["epoch"] == cached["epoch"] && server["runtime_id"] == cached["runtime_id"] &&
@@ -49,7 +62,7 @@ object WakuRecovery {
         val remaining = snapshot.pendingCommands.filterNot { command ->
             command.string("kind") == "prompt" && !command.string("messageId").isNullOrBlank() && command.string("messageId") in ids
         }
-        return snapshot.copy(pendingCommands = remaining)
+        return WakuMessageFiles.materialize(snapshot.copy(pendingCommands = remaining))
     }
 
     fun validateReplayPage(page: JsonObject, runtimeId: String, sessionId: String, after: Long, through: Long?): Long {

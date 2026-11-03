@@ -42,6 +42,10 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val threads = repo.threads
     val runningThreadIds = repo.runningThreadIds
     val artifactHeaders = repo.artifactHeaders
+    val taskFiles = repo.taskFiles
+    fun refreshArtifacts() = repo.refreshArtifacts()
+    suspend fun resolveArtifact(file: com.deerflow.app.domain.model.AgentArtifact, threadId: String) = repo.resolveArtifact(file, threadId)
+    suspend fun resolveMessageFile(file: com.deerflow.app.domain.model.MessageFile, threadId: String) = repo.resolveMessageFile(file, threadId)
     val connection = repo.connection
     val isConnected = repo.isConnected
     val profileKey = repo.profileKey
@@ -76,7 +80,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun updateDraftAttachments(key: String, attachments: List<PendingAttachment>) {
         if (key !in mutableComposer.value.loaded) return
-        val encoded = attachments.map { DraftAttachment(it.uri.toString(), it.displayName, it.mimeType, it.sizeBytes) }
+        val encoded = attachments.map { DraftAttachment(it.uri.toString(), it.displayName, it.mimeType, it.sizeBytes, it.uploadToOss) }
         setDraft(key, (mutableComposer.value.drafts[key] ?: ComposerDraft()).copy(attachments = encoded))
         mutableComposer.value = mutableComposer.value.copy(checkingAttachments = mutableComposer.value.checkingAttachments + key)
         viewModelScope.launch {
@@ -96,15 +100,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        val existing = mutableComposer.value.drafts[key]?.attachments.orEmpty().map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes) }
-        updateDraftAttachments(key, existing + attachments)
+        val existing = mutableComposer.value.drafts[key]?.attachments.orEmpty().map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes, it.uploadToOss) }
+        updateDraftAttachments(key, existing + attachments.map { it.copy(uploadToOss = existing.firstOrNull()?.uploadToOss ?: false) })
+    }
+    fun setDraftOss(key: String, useOss: Boolean) {
+        val files = mutableComposer.value.drafts[key]?.attachments.orEmpty()
+        updateDraftAttachments(key, files.map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes, useOss) })
     }
     fun retryDraft(key: String) {
         if (key !in mutableComposer.value.loaded) loadDraft(key)
         else {
             val draft = mutableComposer.value.drafts[key] ?: ComposerDraft()
             setDraft(key, draft, immediate = true)
-            updateDraftAttachments(key, draft.attachments.map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes) })
+            updateDraftAttachments(key, draft.attachments.map { PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes, it.uploadToOss) })
         }
     }
     fun clearDraft(key: String) {
@@ -166,6 +174,32 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun cancel() = repo.cancel()
     fun newThread() = repo.newThread()
     fun selectThread(id: String) = repo.selectThread(id)
+    fun renameThread(id: String, newTitle: String) = repo.renameThread(id, newTitle)
+    fun restorePendingToDraft(draftKey: String? = null) {
+        val threadId = state.value.threadId
+        val key = draftKey ?: (profileKey.value + "|" + threadId)
+        viewModelScope.launch {
+            if (key !in mutableComposer.value.loaded) {
+                loadDraft(key)
+                val loaded = composer.first { key in it.loaded || key in it.errors }
+                if (key !in loaded.loaded) return@launch
+            }
+            val (pendingText, pendingAttachments) = repo.takeRestorablePrompt(threadId) ?: return@launch
+            if (pendingText.isNotBlank()) {
+                val current = mutableComposer.value.drafts[key]?.text.orEmpty()
+                val newText = if (current.isBlank()) pendingText else "$current\n$pendingText"
+                updateDraftText(key, newText)
+            }
+            if (pendingAttachments.isNotEmpty()) {
+                val existing = mutableComposer.value.drafts[key]?.attachments.orEmpty().map {
+                    PendingAttachment(Uri.parse(it.uri), it.displayName, it.mimeType, it.sizeBytes, it.uploadToOss)
+                }
+                val existingUris = existing.mapTo(mutableSetOf()) { it.uri.toString() }
+                val merged = existing + pendingAttachments.filter { it.uri.toString() !in existingUris }
+                updateDraftAttachments(key, merged)
+            }
+        }
+    }
     fun deleteThread(id: String) {
         clearDraft(profileKey.value + "|" + id)
         repo.deleteThread(id)

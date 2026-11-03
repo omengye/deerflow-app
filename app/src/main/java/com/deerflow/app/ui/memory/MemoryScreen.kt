@@ -23,13 +23,23 @@ fun MemoryScreen(onBack: () -> Unit, vm: MemoryViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<PersonalMemory?>(null) }
     var forgetting by remember { mutableStateOf<PersonalMemory?>(null) }
+    var adding by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf("") }
+    var newKey by remember { mutableStateOf("") }
+    var newContent by remember { mutableStateOf("") }
+    var newCategory by remember { mutableStateOf("profile") }
     BackHandler(onBack = onBack)
     LaunchedEffect(Unit) { vm.refresh() }
     Scaffold(topBar = {
         TopAppBar(title = { Text("个人记忆") }, navigationIcon = {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") }
         }, actions = {
+            TextButton(
+                onClick = { adding = true; newKey = ""; newContent = ""; newCategory = "profile" },
+                enabled = !state.busy && !state.pending && state.page != null
+            ) {
+                Text("添加")
+            }
             TextButton(onClick = vm::refresh, enabled = !state.busy) {
                 Text(if (state.pending) "重新核对" else "刷新")
             }
@@ -37,7 +47,7 @@ fun MemoryScreen(onBack: () -> Unit, vm: MemoryViewModel = viewModel()) {
     }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item { Text("这些个人资料在所有会话和设备间共享。可以在聊天中说“请记住……”添加记忆。",
+            item { Text("这些个人资料在所有会话和设备间共享。可以在聊天中说“请记住……”添加记忆，也可以在此手动添加或管理。",
                 style = MaterialTheme.typography.bodyMedium) }
             if (state.busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
             state.message?.let { message -> item { Text(message) } }
@@ -63,6 +73,57 @@ fun MemoryScreen(onBack: () -> Unit, vm: MemoryViewModel = viewModel()) {
             item { Spacer(Modifier.height(16.dp)) }
         }
     }
+    if (adding) {
+        AlertDialog(
+            onDismissRequest = { adding = false },
+            title = { Text("添加记忆") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newKey,
+                        onValueChange = { newKey = it },
+                        label = { Text("标识键 (如 profile.name)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = newContent,
+                        onValueChange = { if (it.length <= 512) newContent = it },
+                        label = { Text("记忆内容 (最多512字)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = newCategory == "profile",
+                            onClick = { newCategory = "profile" },
+                            label = { Text("个人资料 (profile)") },
+                        )
+                        FilterChip(
+                            selected = newCategory == "preference",
+                            onClick = { newCategory = "preference" },
+                            label = { Text("个人偏好 (preference)") },
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        vm.add(newKey, newContent, newCategory)
+                        adding = false
+                    },
+                    enabled = newKey.isNotBlank() && newContent.isNotBlank() && newCategory.isNotBlank()
+                ) {
+                    Text("添加")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { adding = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
     editing?.let { fact ->
         AlertDialog(onDismissRequest = { editing = null }, title = { Text("修改记忆") },
             text = { OutlinedTextField(value = draft, onValueChange = { if (it.length <= 512) draft = it },
@@ -79,9 +140,13 @@ fun MemoryScreen(onBack: () -> Unit, vm: MemoryViewModel = viewModel()) {
     }
 }
 
-private fun memoryLabel(fact: PersonalMemory): String = when (fact.key) {
-    "profile.last_reported_location" -> "最近告知的所在地"
-    "profile.name" -> "姓名"
-    "preference.language" -> "语言偏好"
-    else -> if (fact.category == "preference") "个人偏好" else "个人资料"
+private fun memoryLabel(fact: PersonalMemory): String {
+    val categoryLabel = if (fact.category == "preference") "个人偏好" else "个人资料"
+    return when (fact.key) {
+        "profile.last_reported_location" -> "最近告知的所在地"
+        "profile.name" -> "姓名"
+        "preference.language" -> "语言偏好"
+        "" -> categoryLabel
+        else -> "$categoryLabel · ${fact.key}"
+    }
 }

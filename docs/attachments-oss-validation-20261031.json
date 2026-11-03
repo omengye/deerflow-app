@@ -1,0 +1,68 @@
+{
+  "version": "2.3.1",
+  "version_code": 13,
+  "waku_protocol": 12,
+  "apk": {
+    "path": "D:\\Tools\\deerflow-app\\dist\\deerflow-2.3.1.apk",
+    "size": 69543885,
+    "sha256": "dc6719161d753a7fdbda44bfb882b1aa025800ee938e99a29ec69336ddb6a014",
+    "signature_verified": true,
+    "certificate_sha256": "46a49b636823458834c1be62bebd379f10533c275ef3c7f54ba7e1ab8179b6d5"
+  },
+  "android_jvm": {
+    "tests": 208,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1
+  },
+  "lint": "0 errors, 22 warnings",
+  "server_skill_startup_tests": {
+    "passed": 4,
+    "packages": 1
+  },
+  "skill_python_tests": {
+    "passed": 9,
+    "skipped": 1,
+    "skip_reason": "Windows symlink creation permission unavailable"
+  },
+  "live_oss": {
+    "kotlin_upload_cold_download": "passed",
+    "agent_script_upload_download_hash_cache": "passed",
+    "owned_test_objects_deleted": true
+  },
+  "android_device": {
+    "device": "Android emulator API 37",
+    "system_tls_s3_roundtrip": "passed",
+    "keystore_save_reload": "passed",
+    "encrypted_preferences_contain_no_plaintext_account_keys": true,
+    "ui": {
+      "attachments_after_restart": true,
+      "no_generated_file_card_in_chat": true,
+      "image_preview": true,
+      "artifact_saved": true,
+      "oss_settings_page": true,
+      "profile_import_and_reopen_after_save": true
+    }
+  },
+  "credential_scan": {
+    "source_hits": [],
+    "apk_and_skill_package_have_no_account_keys": true
+  },
+  "skill_package": {
+    "path": "D:\\Tools\\deerflow-app\\dist\\oss-attachments.zip",
+    "files": 3,
+    "sha256": "fafdacda557f42073493d4bf226020c185d13c25f4e30c09d75fd8cd8b178cdf"
+  },
+  "boundaries": {
+    "historical_attachments_migrated": false,
+    "generated_artifacts_uploaded_to_oss": false,
+    "server_import_rpc_added": false,
+    "running_server_restarted_or_deployed": false,
+    "online_agent_business_prompt_tested": false
+  },
+  "notes": [
+    "Device UI uses a seeded test conversation; upload/download uses real owned OSS test objects.",
+    "The test JDK uses an optional CFCA CA exported from Windows trust. Android passed with system TLS and no custom CA.",
+    "Server must load the enabled oss-attachments skill in the actual runtime configuration before using OSS attachments."
+  ]
+}

@@ -24,6 +24,15 @@ class MemoryViewModel(app: Application) : AndroidViewModel(app) {
     private val mutableState = MutableStateFlow(MemoryUiState())
     val state = mutableState.asStateFlow()
     fun refresh() = perform(null)
+    fun add(key: String, content: String, category: String = "profile") {
+        val page = state.value.page ?: return
+        val k = key.trim()
+        val c = content.trim()
+        if (k.isBlank() || c.isBlank() || c.length > 512) return
+        val existingRevision = page.facts.firstOrNull { it.key == k }?.revision ?: page.versions[k] ?: 0L
+        perform(MemoryOperation(page.profileId, action = "remember", key = k,
+            content = c, category = category.trim().ifBlank { "profile" }, expectedRevision = existingRevision))
+    }
     fun update(fact: PersonalMemory, content: String) {
         val page = state.value.page ?: return
         if (content.isBlank() || content.length > 512) return
@@ -66,6 +75,7 @@ class MemoryViewModel(app: Application) : AndroidViewModel(app) {
                     mutableState.update { it.copy(pending = pending, message =
                         if (pending) "连接暂时不可用，保存结果待核对。恢复网络后点击重新核对。"
                         else if (error is MemoryApiException && error.code == "memory_conflict") "记忆已被其他会话修改，请刷新后再编辑。"
+                        else if (error is MemoryApiException) error.message?.takeIf { msg -> msg.isNotBlank() } ?: "记忆操作未完成，请检查输入后重试。"
                         else "暂时无法读取记忆，请检查连接后重试。") }
                 } else {
                     // Keep a confirmed receipt visible even if the following list refresh fails.

@@ -38,7 +38,7 @@ class WakuTaskArtifacts(
     private val send: suspend (command: JsonObject, sessionId: String, runtimeId: String) -> JsonObject,
 ) {
     private data class Key(val session: String, val runtime: String)
-    private data class Binding(val connection: String, val acpSession: String, val epoch: String, val sequence: Long, val capabilities: JsonObject)
+    private data class Binding(val connection: String, val acpSession: String, val epoch: String?, val sequence: Long, val capabilities: JsonObject)
     private data class Pending(val key: Key, val command: JsonObject, val response: CompletableDeferred<JsonObject>)
     private data class Artifact(val root: String, val node: String, val id: String, val name: String, val mime: String, val size: Long)
     private class RetryableReadFailure(val code: String) : IOException()
@@ -46,6 +46,9 @@ class WakuTaskArtifacts(
     private val lock = Any()
     private val loads = Mutex()
     private val bindings = mutableMapOf<Key, Binding>()
+    private val attachedBindings = mutableSetOf<Key>()
+    private val liveBindings = mutableSetOf<Key>()
+    private val exitedRuntimes = mutableSetOf<Key>()
     private val pending = mutableMapOf<String, Pending>()
     private var closed = false
 
@@ -56,15 +59,24 @@ class WakuTaskArtifacts(
     }
 
     /** Call for live AND replayed envelopes, without awaiting loadArtifacts on the event consumer. */
-    fun onWireEvent(wire: JsonObject) {
+    fun onWireEvent(wire: JsonObject, replayed: Boolean = false) {
         val event = wire["event"] as? JsonObject ?: return
-        if (event.text("kind") != "deerflowTasks") return
-        val payload = event["payload"] as? JsonObject ?: return
         val key = Key(wire.text("sessionId") ?: return, wire.text("runtimeId") ?: return)
         synchronized(lock) {
             if (closed) return
+            if (event.text("kind") == "processExited") {
+                exitedRuntimes += key
+                bindings.remove(key); attachedBindings -= key; liveBindings -= key
+                failPending(key, "服务器运行时已结束，文件读取连接不可用")
+                return
+            }
+            if (event.text("kind") != "deerflowTasks" || key in exitedRuntimes) return
+            val payload = event["payload"] as? JsonObject ?: return
             when (payload.text("kind")) {
                 "ready" -> {
+                    // An attach snapshot describes the current ACP connection. Earlier journal
+                    // entries cannot replace it, while new live Ready events still can.
+                    if (replayed && key in attachedBindings) return
                     val binding = Binding(
                         payload.text("connectionId") ?: return,
                         payload.text("sessionId") ?: return,
@@ -73,12 +85,16 @@ class WakuTaskArtifacts(
                         payload["capabilities"] as? JsonObject ?: return,
                     )
                     val previous = bindings[key]
-                    if (previous != null && (previous.epoch != binding.epoch || previous.sequence >= binding.sequence)) return
+                    if (previous?.epoch != null && (previous.epoch != binding.epoch || previous.sequence >= binding.sequence)) return
                     if (previous != null && previous.connection != binding.connection) {
                         failPending(key, "任务连接已变化，请重新刷新产物")
                     }
                     bindings[key] = binding
+                    if (!replayed) { liveBindings += key; attachedBindings -= key }
                 }
+                // Task data changed. Each load already queries fresh pages; the ACP
+                // connection, capabilities and in-flight replies remain valid.
+                "invalidated" -> Unit
                 "reply", "failed" -> {
                     val command = payload["command"] as? JsonObject ?: return
                     val id = command.text("requestId") ?: return
@@ -100,12 +116,33 @@ class WakuTaskArtifacts(
         }
     }
 
+    /** v12 supplies current Ready authority directly, even when replay starts after that event. */
+    fun onAttached(sessionId: String, attachment: WakuRuntimeAttachment) {
+        val runtimeId = attachment.runtimeId ?: return
+        val ready = attachment.deerflowReady ?: return
+        val key = Key(sessionId, runtimeId)
+        synchronized(lock) {
+            if (closed || key in liveBindings || key in exitedRuntimes) return
+            val binding = Binding(ready.text("connectionId") ?: return, ready.text("sessionId") ?: return,
+                null, 0, ready["capabilities"] as? JsonObject ?: return)
+            if (bindings[key]?.connection != binding.connection) failPending(key, "任务连接已变化，请重新刷新产物")
+            bindings[key] = binding
+            attachedBindings += key
+        }
+    }
+
     /** One helper belongs to one WebSocket link. Do not carry ACP authority across a new link. */
     fun disconnected() = synchronized(lock) {
         closed = true
         bindings.clear()
+        attachedBindings.clear(); liveBindings.clear()
+        exitedRuntimes.clear()
         pending.values.forEach { it.response.completeExceptionally(IOException("连接已断开，产物下载未完成")) }
         pending.clear()
+    }
+
+    fun hasExited(sessionId: String, runtimeId: String): Boolean = synchronized(lock) {
+        Key(sessionId, runtimeId) in exitedRuntimes
     }
 
     suspend fun loadArtifacts(
@@ -122,65 +159,108 @@ class WakuTaskArtifacts(
             if (!binding.capabilities.flag("tree") || !binding.capabilities.flag("artifactList") || !binding.capabilities.flag("artifactRead")) {
                 throw IOException("当前服务器未提供可读取的任务产物，请升级服务器")
             }
-            val files = linkedMapOf<String, Artifact>()
+            val files = collect(key, binding)
             var total = 0L
-            var treeCursor: String? = null
-            val treeCursors = mutableSetOf<String>()
-            var nodeCount = 0
-            do {
-                val page = control(key, binding, action("list") {
-                    put("rootId", JsonNull); put("cursor", treeCursor?.let(::JsonPrimitive) ?: JsonNull); put("limit", 100)
-                }, "page")
-                checkData(page.text("sessionId") == binding.acpSession, "任务页会话不匹配")
-                for (value in page.requiredArray("nodes")) {
-                    val node = value as? JsonObject ?: throw IOException("无效的任务节点")
-                    checkData(++nodeCount <= 256, "任务节点超过本次产物读取上限")
-                    val root = node.requiredText("rootId")
-                    val nodeId = node.requiredText("id")
-                    checkData(node.text("rootSessionId") == binding.acpSession, "任务节点属于其他会话")
-                    var cursor: String? = null
-                    val cursors = mutableSetOf<String>()
-                    do {
-                        val artifacts = control(key, binding, action("artifactList") {
-                            put("rootId", root); put("nodeId", nodeId)
-                            put("cursor", cursor?.let(::JsonPrimitive) ?: JsonNull); put("limit", 100)
-                        }, "artifacts")
-                        checkData(artifacts.text("rootId") == root && artifacts.text("nodeId") == nodeId, "产物页节点不匹配")
-                        for (item in artifacts.requiredArray("artifacts")) {
-                            val value = item as? JsonObject ?: throw IOException("无效的产物元数据")
-                            val artifact = parseArtifact(root, nodeId, value)
-                            val identity = "$root/$nodeId/${artifact.id}"
-                            if (files.containsKey(identity)) continue
-                            checkData(files.size < 64, "单次最多读取 64 个产物")
-                            checkData(artifact.size <= maxFileBytes && artifact.size <= maxTotalBytes - total, "产物超过移动端下载大小上限")
-                            total += artifact.size
-                            files[identity] = artifact
-                        }
-                        cursor = nextCursor(artifacts, cursors)
-                    } while (cursor != null)
-                }
-                treeCursor = nextCursor(page, treeCursors)
-            } while (treeCursor != null)
-            files.values.map { download(key, binding, it).also { file -> onArtifact(file) } }
+            files.forEach {
+                checkData(it.size <= maxFileBytes && it.size <= maxTotalBytes - total, "产物超过移动端下载大小上限")
+                total += it.size
+            }
+            files.map { download(key, binding, it).also { file -> onArtifact(file) } }
         }
+    }
+
+    /** Metadata only. Opening the files page must not download file bodies. */
+    suspend fun listArtifacts(sessionId: String, runtimeId: String): List<AgentArtifact> = loads.withLock {
+        withContext(Dispatchers.IO) {
+            val (key, binding) = currentBinding(sessionId, runtimeId)
+            collect(key, binding).map { result(it) }
+        }
+    }
+
+    suspend fun loadArtifact(sessionId: String, runtimeId: String, path: String): AgentArtifact = loads.withLock {
+        withContext(Dispatchers.IO) {
+            val (key, binding) = currentBinding(sessionId, runtimeId)
+            checkData(binding.capabilities.flag("artifactRead"), "服务器未提供产物下载能力")
+            val file = collect(key, binding).firstOrNull { result(it).path == path }
+                ?: throw IOException("此文件已不在当前会话的产物列表中，请刷新")
+            checkData(file.size <= maxFileBytes, "单个产物最大支持下载 64 MiB")
+            download(key, binding, file)
+        }
+    }
+
+    private suspend fun currentBinding(sessionId: String, runtimeId: String): Pair<Key, Binding> {
+        requireWakuUuid(sessionId, "sessionId"); requireWakuUuid(runtimeId, "runtimeId")
+        val key = Key(sessionId, runtimeId)
+        ensureBinding(key)
+        val binding = synchronized(lock) { bindings[key] } ?: throw IOException("当前会话尚未声明产物能力")
+        checkData(binding.capabilities.flag("tree") && binding.capabilities.flag("artifactList"), "服务器未提供产物列表能力")
+        return key to binding
+    }
+
+    private suspend fun collect(key: Key, binding: Binding): List<Artifact> {
+        val files = linkedMapOf<String, Artifact>()
+        var treeCursor: String? = null
+        val treeCursors = mutableSetOf<String>()
+        var nodeCount = 0
+        do {
+            val page = control(key, binding, action("list") {
+                put("rootId", JsonNull); put("cursor", treeCursor?.let(::JsonPrimitive) ?: JsonNull); put("limit", 100)
+            }, "page")
+            checkData(page.text("sessionId") == binding.acpSession, "任务页会话不匹配")
+            for (value in page.requiredArray("nodes")) {
+                val node = value as? JsonObject ?: throw IOException("无效的任务节点")
+                checkData(++nodeCount <= 256, "任务节点超过本次产物读取上限")
+                val root = node.requiredText("rootId")
+                val nodeId = node.requiredText("id")
+                checkData(node.text("rootSessionId") == binding.acpSession, "任务节点属于其他会话")
+                var cursor: String? = null
+                val cursors = mutableSetOf<String>()
+                do {
+                    val artifacts = control(key, binding, action("artifactList") {
+                        put("rootId", root); put("nodeId", nodeId)
+                        put("cursor", cursor?.let(::JsonPrimitive) ?: JsonNull); put("limit", 100)
+                    }, "artifacts")
+                    checkData(artifacts.text("rootId") == root && artifacts.text("nodeId") == nodeId, "产物页节点不匹配")
+                    for (item in artifacts.requiredArray("artifacts")) {
+                        val value = item as? JsonObject ?: throw IOException("无效的产物元数据")
+                        val artifact = parseArtifact(root, nodeId, value)
+                        val identity = "$root/$nodeId/${artifact.id}"
+                        if (files.containsKey(identity)) continue
+                        checkData(files.size < 64, "单次最多读取 64 个产物")
+                        files[identity] = artifact
+                    }
+                    cursor = nextCursor(artifacts, cursors)
+                } while (cursor != null)
+            }
+            treeCursor = nextCursor(page, treeCursors)
+        } while (treeCursor != null)
+        return files.values.toList()
     }
 
     /** A saved projection cursor may be after Ready; recover authority from this live runtime's journal. */
     private suspend fun ensureBinding(key: Key) {
         synchronized(lock) {
             checkData(!closed, "连接已断开")
+            checkData(key !in exitedRuntimes, "服务器运行时已结束，文件读取连接不可用")
             if (bindings.containsKey(key)) return
         }
         var checkpoint = readCheckpoint(key.session, key.runtime) ?: WakuControlCheckpoint()
         val pageBudget = requestTimeoutMs * maxReadAttempts + retryDelayMs * maxReadAttempts * (maxReadAttempts - 1) / 2 + 1_000
-        WakuReplayRunner(pageTimeoutMs = pageBudget).run(key.session, key.runtime, checkpoint.position,
-            request = { command -> retryRead(key, "恢复产物索引") { send(command, key.session, key.runtime) } },
-            commit = { page ->
-                checkpoint = checkpoint.advance(page)
-                saveCheckpoint(key.session, checkpoint)
-            },
-        )
-        checkpoint.taskReady?.let(::onWireEvent)
+        val savedPosition = checkpoint.position
+        repeat(2) { attempt ->
+            WakuReplayRunner(pageTimeoutMs = pageBudget).run(key.session, key.runtime, checkpoint.position,
+                request = { command -> retryRead(key, "恢复产物索引") { send(command, key.session, key.runtime) } },
+                commit = { page ->
+                    checkpoint = checkpoint.advance(page)
+                    saveCheckpoint(key.session, checkpoint)
+                },
+            )
+            checkpoint.taskReady?.let { onWireEvent(it, replayed = true); return }
+            // 2.2.0 could persist a completed control cursor after incorrectly deleting
+            // Ready on invalidated. One bounded rescan recovers that original announcement.
+            if (attempt != 0 || savedPosition == null) return
+            checkpoint = WakuControlCheckpoint()
+        }
     }
 
     private suspend fun control(key: Key, binding: Binding, action: JsonObject, responseKind: String): JsonObject {
@@ -320,9 +400,9 @@ class WakuTaskArtifacts(
         digest.digest().joinToString("") { "%02x".format(it.toInt() and 255) }
     } catch (_: IOException) { null }
 
-    private fun result(artifact: Artifact, file: File) = AgentArtifact(
+    private fun result(artifact: Artifact, file: File? = null) = AgentArtifact(
         path = "waku:${artifact.root}/${artifact.node}/${artifact.id}", name = safeName(artifact.name),
-        url = file.toURI().toString(), mimeType = artifact.mime, size = artifact.size,
+        url = file?.toURI()?.toString().orEmpty(), mimeType = artifact.mime, size = artifact.size,
         kind = if (artifact.mime.startsWith("image/")) "image" else "file",
     )
 
@@ -346,7 +426,7 @@ class WakuTaskArtifacts(
 
     private fun safeName(name: String): String = name.substringAfterLast('/').substringAfterLast('\\')
         .map { if (it.isISOControl() || it in "<>:\"/\\|?*") '_' else it }.joinToString("")
-        .trim(' ', '.').take(100).ifBlank { "artifact.bin" }
+        .trim(' ', '.').take(50).ifBlank { "artifact.bin" }
 
     private fun action(kind: String, body: JsonObjectBuilder.() -> Unit) = buildJsonObject { put("kind", kind); body() }
     private fun JsonObject.text(key: String): String? = (get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content

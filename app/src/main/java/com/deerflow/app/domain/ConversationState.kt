@@ -4,6 +4,7 @@ import com.deerflow.app.domain.model.AgentArtifact
 import com.deerflow.app.domain.model.ChatMessage
 import com.deerflow.app.domain.model.Interrupt
 import com.deerflow.app.domain.model.Roles
+import com.deerflow.app.domain.model.MessageFile
 
 /** One rendered unit in the transcript. Port of tui.displayBlock (+ a stable key). */
 data class DisplayBlock(
@@ -25,6 +26,7 @@ data class DisplayBlock(
     val messageId: String? = null,
     /** 1-based user turn to which this block belongs. */
     val turnIndex: Int? = null,
+    val attachments: List<MessageFile> = emptyList(),
 )
 
 /** Name/arguments/result of a tool call, kept structured for rendering. */

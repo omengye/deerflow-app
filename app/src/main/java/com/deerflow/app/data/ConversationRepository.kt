@@ -2,6 +2,7 @@ package com.deerflow.app.data
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import com.deerflow.app.data.background.BackgroundConnectionPolicy
 import com.deerflow.app.data.background.BackgroundConnectionService
@@ -12,6 +13,8 @@ import com.deerflow.app.data.agui.AguiJson
 import com.deerflow.app.data.settings.AppSettings
 import com.deerflow.app.data.settings.SettingsStore
 import com.deerflow.app.data.waku.*
+import com.deerflow.app.data.oss.S3Storage
+import com.deerflow.app.data.oss.OssAttachmentEnvelope
 import com.deerflow.app.domain.BlockKind
 import com.deerflow.app.domain.ConversationReducer
 import com.deerflow.app.domain.ConversationState
@@ -23,7 +26,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.*
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.util.Base64
@@ -60,6 +62,8 @@ class ConversationRepository(
     private val _pendingPermissions = MutableStateFlow<List<JsonObject>>(emptyList())
     private val _pendingQuestions = MutableStateFlow<List<JsonObject>>(emptyList())
     private val _unknownSubmission = MutableStateFlow<String?>(null)
+    private val _taskFiles = MutableStateFlow(TaskFilesState())
+    val taskFiles = _taskFiles.asStateFlow()
     val state = _state.asStateFlow()
     val threads = _threads.asStateFlow()
     val runningThreadIds = _runningThreadIds.asStateFlow()
@@ -103,6 +107,7 @@ class ConversationRepository(
         val runtimes = mutableMapOf<String, Runtime>()
         val checkpoint = Channel<Unit>(Channel.CONFLATED)
         val titleRefresh = Channel<Unit>(Channel.CONFLATED)
+        val catalogChanges = Channel<Unit>(Channel.CONFLATED)
         val titleChecked = mutableMapOf<String, JsonObject>()
         val catalogRefresh = Mutex()
         val artifactJobs = mutableMapOf<String, Job>()
@@ -193,7 +198,9 @@ class ConversationRepository(
                         else -> command
                     }
                 })
-                p.snapshots[stored.session.s("id") ?: return@forEach] = recovered
+                val id = stored.session.s("id") ?: return@forEach
+                p.snapshots[id] = recovered
+                p.artifacts[id] = recovered.artifactFiles
             }
             p.selected = p.snapshots.values.maxByOrNull { it.session.n("updated_at") }?.session?.s("id") ?: initialId
             profiles[key] = p
@@ -238,8 +245,9 @@ class ConversationRepository(
                     mutex.withLock {
                         ensureCurrent(link)
                         if (current.selected != id || id in current.syncing || outgoingOperations.value > 0 ||
-                            current.snapshots[id]?.pendingCommands?.isNotEmpty() == true || current.snapshots[id]?.session?.s("status") in BUSY) {
-                            throw CancellationException("优先同步当前会话，文件读取已暂停")
+                            current.snapshots[id]?.pendingCommands?.isNotEmpty() == true || current.snapshots[id]?.pendingHistory != null ||
+                            current.snapshots[id]?.session?.s("status") in BUSY) {
+                            throw IOException("会话忙碌或正在同步，产物读取暂时暂停，请稍后刷新")
                         }
                     }
                 },
@@ -308,7 +316,7 @@ class ConversationRepository(
                     ensureCurrent(link)
                     when (wire.s("type")) {
                         "event" -> receiveEvent(link, wire)
-                        "taskStateChanged" -> launch { runCatching { loadCatalog(link) } }
+                        "taskStateChanged" -> link.catalogChanges.trySend(Unit)
                         "shuttingDown" -> link.ended.complete(IOException("服务器正在关闭"))
                     }
                 }
@@ -328,6 +336,30 @@ class ConversationRepository(
                 try { refreshTitles(link) }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) { /* Optional metadata can retry on the next catalog refresh. */ }
+            }
+        }
+        val catalogReader = launch {
+            for (signal in link.catalogChanges) {
+                try {
+                    for (id in loadCatalog(link)) {
+                        try {
+                            // Join an in-flight recovery first, then check whether its snapshot
+                            // predates the history change that invalidated this subscription.
+                            do {
+                                hydrateAttach(link, id, forceHydrate = true)
+                            } while (mutex.withLock {
+                                ensureCurrent(link)
+                                WakuRecovery.needsHistoryRefresh(link.profile.snapshots[id]?.session, link.profile.catalog[id])
+                            })
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (error: Exception) { mutex.withLock {
+                            ensureCurrent(link)
+                            link.profile.syncErrors[id] = "历史同步未完成：${error.message ?: "请重新同步"}"
+                            publish(link.profile)
+                        } }
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* The next catalog notification or refresh retries this read. */ }
             }
         }
         val serverWriter = launch {
@@ -369,14 +401,14 @@ class ConversationRepository(
             link.ended.await()
         } finally {
             recoveryJobs.forEach { it.cancel() }
-            receive.cancel(); watch.cancel(); localWriter.cancel(); serverWriter.cancel(); titleReader.cancel()
+            receive.cancel(); watch.cancel(); localWriter.cancel(); serverWriter.cancel(); titleReader.cancel(); catalogReader.cancel()
         }
     }
 
     private suspend fun loadCatalog(link: Link) = link.catalogRefresh.withLock {
         val result = link.client.request(wakuCommand("loadTaskState"))
         require(result.s("type") == "taskState") { "服务器返回的会话列表无效" }
-        mutex.withLock {
+        val changedHistory = mutex.withLock {
             ensureCurrent(link)
             val p = link.profile
             p.projects.putAll(result.objs("projects").associateBy { it.s("id").orEmpty() })
@@ -384,9 +416,23 @@ class ConversationRepository(
             p.catalog.putAll(result.objs("sessions").filter { it.s("provider") == "deerFlow" }.associateBy { it.s("id").orEmpty() })
             p.remoteIds.clear(); p.remoteIds += p.catalog.keys
             // Only copy title metadata: catalog rows deliberately contain empty transcripts/cursors.
+            val changed = mutableListOf<String>()
             for ((id, summary) in p.catalog) {
                 val snapshot = p.snapshots[id] ?: continue
-                val merged = WakuSessionTitles.mergeMetadata(snapshot.session, summary)
+                if (WakuRecovery.needsHistoryRefresh(snapshot.session, summary)) {
+                    p.ready -= id; p.serverDirty -= id
+                    p.syncErrors[id] = "会话历史已更新，正在重新同步…"
+                    link.artifactJobs[id]?.cancel()
+                    p.artifacts.remove(id); p.artifactErrors.remove(id)
+                    if (id == p.selected || id in link.runtimes) changed += id
+                    continue
+                }
+                var merged = WakuSessionTitles.mergeMetadata(snapshot.session, summary)
+                if (id in p.serverDirty) {
+                    snapshot.session["title"]?.takeIf { it is JsonPrimitive && it.content.isNotBlank() }?.let {
+                        merged = merged.patch("title" to it)
+                    }
+                }
                 if (merged != snapshot.session) putSnapshot(p, id, snapshot.copy(session = merged), false)
             }
             for (id in p.remoteIds) p.drafts.remove(id)
@@ -399,8 +445,10 @@ class ConversationRepository(
                 else p.blocked[id] = "本地历史尚未在服务器中找到对应会话，请核对服务器配置。"
             }
             publish(p)
+            changed
         }
         link.titleRefresh.trySend(Unit)
+        changedHistory
     }
 
     /** Read missing title history without attaching a runtime or submitting provider work. */
@@ -425,7 +473,15 @@ class ConversationRepository(
                     if (remote?.s("id") == id) {
                         val current = p.snapshots[id]
                         val next = if (current == null) WakuProjection.fromSession(remote).copy(remoteKnown = true)
-                            else current.copy(session = WakuSessionTitles.mergeMetadata(current.session, remote, fullSnapshot = true))
+                        else {
+                            var merged = WakuSessionTitles.mergeMetadata(current.session, remote, fullSnapshot = true)
+                            if (id in p.serverDirty) {
+                                current.session["title"]?.takeIf { it is JsonPrimitive && it.content.isNotBlank() }?.let {
+                                    merged = merged.patch("title" to it)
+                                }
+                            }
+                            current.copy(session = merged)
+                        }
                         if (next != current) putSnapshot(p, id, next, false)
                         publish(p)
                     }
@@ -442,6 +498,7 @@ class ConversationRepository(
         val shouldHydrate = mutex.withLock {
             ensureCurrent(link)
             link.artifactJobs[id]?.cancel()
+            link.runtimes[id]?.catchingUp = true
             link.profile.syncErrors.remove(id)
             link.profile.syncStatus[id] = "正在校验会话…"
             link.profile.syncing += id; link.profile.ready -= id; publish(link.profile)
@@ -456,13 +513,26 @@ class ConversationRepository(
                 }
                 return
             }
-            val attached = link.client.request(wakuCommand("attachSession"), id)
-            require(attached.s("type") == "sessionRuntime") { "无法识别服务器运行时" }
-            val runtimeId = attached.s("runtimeId")
-            val cached = mutex.withLock { ensureCurrent(link); link.profile.snapshots[id] }
-            if (forceHydrate || runtimeId == null || cached?.replayPosition()?.runtimeId != runtimeId) {
-                hydrateSnapshot(link, id)
+            var attached = WakuRuntimeAttachment.parse(link.client.request(wakuCommand("attachSession"), id))
+            val needsHydration = mutex.withLock {
+                ensureCurrent(link)
+                val cached = link.profile.snapshots[id]
+                forceHydrate || attached.runtimeId == null || cached?.replayPosition()?.runtimeId != attached.runtimeId ||
+                    WakuRecovery.needsHistoryRefresh(cached?.session, link.profile.catalog[id])
             }
+            if (needsHydration) {
+                hydrateSnapshot(link, id)
+                // Hydration can cross a desktop rewind. Re-read runtime identity instead of
+                // attaching the old journal to the newly truncated conversation.
+                attached = WakuRuntimeAttachment.parse(link.client.request(wakuCommand("attachSession"), id))
+            }
+            val runtimeId = attached.runtimeId
+            mutex.withLock {
+                ensureCurrent(link)
+                val p = link.profile
+                putSnapshot(p, id, attached.applyTo(p.snapshots.getValue(id)), false)
+            }
+            link.artifacts.onAttached(id, attached)
             if (runtimeId == null) recoverNativeHistory(link, id)
             else {
                 mutex.withLock {
@@ -470,7 +540,8 @@ class ConversationRepository(
                     val p = link.profile
                     p.blocked.remove(id)
                     putSnapshot(p, id, WakuProjection.bindRuntime(p.snapshots.getValue(id), runtimeId), serverDirty = false)
-                    link.runtimes[id] = Runtime(runtimeId)
+                    val existing = link.runtimes[id]?.takeIf { it.id == runtimeId }
+                    link.runtimes[id] = existing?.apply { catchingUp = true } ?: Runtime(runtimeId)
                 }
                 try { catchUp(link, id, runtimeId) }
                 catch (changed: ReplayEpochChanged) {
@@ -479,13 +550,22 @@ class ConversationRepository(
                         ensureCurrent(link)
                         val p = link.profile
                         putSnapshot(p, id, WakuProjection.bindRuntime(p.snapshots.getValue(id), runtimeId), false)
-                        link.runtimes[id] = Runtime(runtimeId)
+                        val existing = link.runtimes[id]?.takeIf { it.id == runtimeId }
+                        link.runtimes[id] = existing?.apply {
+                            catchingUp = true
+                            buffered.clear()
+                            bytes = 0
+                        } ?: Runtime(runtimeId)
                     }
                     catchUp(link, id, runtimeId)
                 }
             }
             mutex.withLock {
-                ensureCurrent(link); link.profile.ready += id; link.profile.syncErrors.remove(id)
+                ensureCurrent(link)
+                require(!WakuRecovery.needsHistoryRefresh(link.profile.snapshots[id]?.session, link.profile.catalog[id])) {
+                    "会话历史已更新，请重新同步"
+                }
+                link.profile.ready += id; link.profile.syncErrors.remove(id)
             }
         } finally {
             withContext(NonCancellable) {
@@ -493,6 +573,8 @@ class ConversationRepository(
                     link.profile.syncing -= id; link.profile.syncStatus.remove(id); publish(link.profile)
                     if (id in link.profile.ready && link.profile.snapshots[id]?.session?.s("status") !in BUSY) {
                         link.runtimes[id]?.let { scheduleArtifacts(link, id, it.id) }
+                    } else if (id !in link.profile.ready) {
+                        link.runtimes.remove(id)
                     }
                 } }
             }
@@ -505,12 +587,22 @@ class ConversationRepository(
         mutex.withLock {
             ensureCurrent(link)
             val p = link.profile
-            var snapshot = if (epoch == null) WakuRecovery.chooseSnapshot(p.snapshots[id], remote)
-                else WakuProjection.fromSession(remote).copy(pendingCommands = p.snapshots[id]?.pendingCommands.orEmpty())
+            val previous = p.snapshots[id]
+            val dirtyTitle = previous?.takeIf { id in p.serverDirty && !WakuRecovery.needsHistoryRefresh(it.session, remote) }
+                ?.session?.get("title")?.takeIf { it is JsonPrimitive && it.content.isNotBlank() }
+            var snapshot = if (epoch == null) WakuRecovery.chooseSnapshot(previous, remote)
+                else WakuProjection.fromSession(remote).copy(pendingCommands = previous?.pendingCommands.orEmpty(),
+                    sentMessages = previous?.sentMessages.orEmpty(),
+                    artifactFiles = previous?.takeIf { WakuRecovery.historyRevision(it.session) == WakuRecovery.historyRevision(remote) }?.artifactFiles.orEmpty())
+            require(remote.s("id") == id && !WakuRecovery.needsHistoryRefresh(remote, p.catalog[id])) {
+                "服务器会话历史已变化，请重新同步"
+            }
             if (epoch != null && snapshot.replayPosition()?.epoch != epoch) {
                 snapshot = snapshot.copy(cursor = null, session = snapshot.session.patch("runtime_event_cursor" to JsonNull))
             }
-            putSnapshot(p, id, WakuRecovery.resolveObservedCommands(snapshot).copy(remoteKnown = true), false)
+            var resolved = WakuRecovery.resolveObservedCommands(snapshot).copy(remoteKnown = true)
+            if (dirtyTitle != null) resolved = resolved.copy(session = resolved.session.patch("title" to dirtyTitle))
+            putSnapshot(p, id, resolved, dirtyTitle != null)
         }
     }
 
@@ -540,7 +632,8 @@ class ConversationRepository(
                 restored = WakuProjection.fromSession(snapshot.session.patch(
                     "messages" to history.arr("messages"), "turns" to history.arr("turns"),
                     "runtime_event_cursor" to JsonNull,
-                )).copy(pendingCommands = restored.pendingCommands, remoteKnown = snapshot.remoteKnown)
+                )).copy(pendingCommands = restored.pendingCommands, remoteKnown = snapshot.remoteKnown,
+                    sentMessages = restored.sentMessages, artifactFiles = restored.artifactFiles)
             }
         }
         mutex.withLock {
@@ -563,7 +656,7 @@ class ConversationRepository(
             commit = { page -> mutex.withLock {
                 ensureCurrent(link)
                 for (wire in page.events) {
-                    link.artifacts.onWireEvent(wire)
+                    link.artifacts.onWireEvent(wire, replayed = true)
                     link.toolApproval.onWireEvent(wire)
                     applyEvent(link, wire)
                 }
@@ -586,7 +679,7 @@ class ConversationRepository(
                 putSnapshot(p, id, snapshot, false)
             }
             snapshot.taskReady?.takeIf { it.s("epoch") == end.epoch && it.s("runtimeId") == runtimeId }
-                ?.let(link.artifacts::onWireEvent)
+                ?.let { link.artifacts.onWireEvent(it, replayed = true) }
             val buffered = runtime.buffered.toList()
             runtime.buffered.clear(); runtime.bytes = 0; runtime.catchingUp = false
             for (wire in buffered) {
@@ -655,6 +748,7 @@ class ConversationRepository(
     private fun applyEvent(link: Link, wire: JsonObject) {
         val id = wire.s("sessionId") ?: return
         val previous = link.profile.snapshots[id] ?: return
+        if (WakuRecovery.needsHistoryRefresh(previous.session, link.profile.catalog[id])) return
         var snapshot = WakuProjection.reduce(previous, wire)
         if (snapshot === previous) return
         snapshot = WakuRecovery.resolveObservedCommands(snapshot)
@@ -663,7 +757,10 @@ class ConversationRepository(
         if (eventKind in setOf("turnFinished", "processExited")) {
             snapshot = snapshot.copy(pendingCommands = snapshot.pendingCommands.filter { it.s("kind") == "prompt" })
             link.checkpoint.trySend(Unit)
-            if (link.runtimes[id]?.catchingUp == false) wire.s("runtimeId")?.let { scheduleArtifacts(link, id, it) }
+            if (eventKind == "turnFinished" && link.runtimes[id]?.catchingUp == false) {
+                wire.s("runtimeId")?.let { scheduleArtifacts(link, id, it) }
+            }
+            if (eventKind == "processExited") link.artifactJobs[id]?.cancel()
         }
         putSnapshot(link.profile, id, snapshot)
         if (!retention.state.value.visible && link.runtimes[id]?.catchingUp == false &&
@@ -675,21 +772,21 @@ class ConversationRepository(
 
     /** Called under mutex; asynchronous replies must continue through the independent event consumer. */
     private fun scheduleArtifacts(link: Link, id: String, runtimeId: String) {
-        if (link.profile.selected != id || link.artifactJobs[id]?.isActive == true) return
+        if (link.profile.selected != id || link.artifactJobs[id]?.isActive == true || link.artifacts.hasExited(id, runtimeId)) return
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val files = link.artifacts.loadArtifacts(id, runtimeId) { file ->
-                    mutex.withLock {
-                        if (active === link) {
-                            val completed = link.profile.artifacts[id].orEmpty().filterNot { it.path == file.path } + file
-                            link.profile.artifacts[id] = completed
-                            publish(link.profile)
-                        }
-                    }
-                }
+                val files = link.artifacts.listArtifacts(id, runtimeId)
                 mutex.withLock {
-                    if (active === link) { link.profile.artifacts[id] = files; link.profile.artifactErrors.remove(id); publish(link.profile) }
+                    if (active === link) {
+                        val old = link.profile.artifacts[id].orEmpty().associateBy { it.path }
+                        val indexed = files.map { file ->
+                            old[file.path]?.takeIf { it.name == file.name && it.size == file.size && it.mimeType == file.mimeType }
+                                ?.let { file.copy(url = it.url) } ?: file
+                        }
+                        saveArtifactIndex(link.profile, id, indexed)
+                        link.profile.artifactErrors.remove(id); publish(link.profile)
+                    }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
@@ -701,17 +798,115 @@ class ConversationRepository(
                     }
                 }
             } finally { withContext(NonCancellable) { mutex.withLock {
-                if (link.artifactJobs[id] === job) link.artifactJobs.remove(id)
+                if (link.artifactJobs[id] === job) { link.artifactJobs.remove(id); publish(link.profile) }
             } } }
         }
         link.artifactJobs[id] = job
         job.start()
+        publish(link.profile)
+    }
+
+    private fun saveArtifactIndex(p: Profile, id: String, files: List<AgentArtifact>) {
+        p.artifacts[id] = files
+        p.snapshots[id]?.let { putSnapshot(p, id, it.copy(artifactFiles = files), false) }
+        flushLocal(p)
+    }
+
+    fun refreshArtifacts() = scope.launch {
+        mutex.withLock {
+            val p = profile ?: return@withLock
+            val link = active?.takeIf { it.profile === p }
+            val runtime = link?.runtimes?.get(p.selected)
+            if (link != null && runtime != null && !link.artifacts.hasExited(p.selected, runtime.id)) {
+                scheduleArtifacts(link, p.selected, runtime.id)
+            } else {
+                p.artifactErrors[p.selected] = "当前没有可用的文件读取连接；已下载的文件仍可打开。可返回会话重新同步。"
+                publish(p)
+            }
+        }
+    }
+
+    private fun verifiedLocalArtifact(p: Profile, file: AgentArtifact): AgentArtifact? = runCatching {
+        if (file.url.isBlank()) return null
+        val uri = java.net.URI(file.url)
+        if (uri.scheme != "file") return null
+        val local = File(uri).canonicalFile
+        val root = File(appContext.cacheDir, "waku-${p.key}/waku-artifacts").canonicalFile
+        if (local.toPath().startsWith(root.toPath()) && local.isFile && local.length() == file.size &&
+            local.name.substringBefore('-') == com.deerflow.app.data.oss.S3Signing.fileHash(local)
+        ) file else null
+    }.getOrNull()
+
+    suspend fun resolveArtifact(file: AgentArtifact, threadId: String): AgentArtifact {
+        val (p, link) = mutex.withLock {
+            val p = profile ?: error("会话不可用")
+            require(p.selected == threadId && p.artifacts[threadId].orEmpty().any { it.path == file.path }) { "会话已切换，请重新打开文件" }
+            p to active?.takeIf { it.profile === p && _isConnected.value }
+        }
+        val runtime = link?.runtimes?.get(threadId)?.id
+        val loaded = if (link != null && runtime != null && !link.artifacts.hasExited(threadId, runtime)) {
+            try {
+                link.artifacts.loadArtifact(threadId, runtime, file.path)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                withContext(Dispatchers.IO) { verifiedLocalArtifact(p, file) } ?: throw error
+            }
+        } else withContext(Dispatchers.IO) {
+            verifiedLocalArtifact(p, file) ?: run {
+                val uri = runCatching { java.net.URI(file.url) }.getOrNull()
+                require(uri?.scheme == "file") { "此文件尚未下载，请连接服务器后重试" }
+                error("文件缓存不可用，请连接服务器重新下载")
+            }
+        }
+        mutex.withLock {
+            val current = p.artifacts[threadId].orEmpty()
+            val updated = current.map { if (it.path == loaded.path) loaded else it }
+            if (updated != current) {
+                saveArtifactIndex(p, threadId, updated)
+                publish(p)
+            }
+        }
+        return loaded
+    }
+
+    private fun messageCache(p: Profile) = MessageFileCache(File(appContext.cacheDir, "waku-${p.key}/message-files"))
+
+    suspend fun resolveMessageFile(file: MessageFile, threadId: String): AgentArtifact {
+        val p = mutex.withLock {
+            val p = profile ?: error("会话不可用")
+            val snapshot = p.snapshots[threadId]
+            val fromSent = snapshot?.sentMessages?.values.orEmpty().any { sent -> sent.attachments.any { it.id == file.id } }
+            val fromSession = snapshot?.session?.objs("messages").orEmpty().any { msg ->
+                msg.objs("attachments").any { it.s("name") == file.name || it.s("blob_reference") == file.serverReference || it.s("path") == file.serverPath }
+            }
+            require(p.selected == threadId && (fromSent || fromSession || file.oss != null || file.serverReference != null)) {
+                "会话已切换，请重新打开附件"
+            }
+            p
+        }
+        val result = messageCache(p).resolve(file, settings.currentOss()) { command ->
+            val link = active?.takeIf { it.profile === p && profile === p } ?: error("请连接此会话的服务器后重试")
+            link.client.request(command, timeoutMs = 120_000)
+        }
+        mutex.withLock {
+            p.snapshots[threadId]?.let { snapshot ->
+                val sent = snapshot.sentMessages.mapValues { (_, value) -> value.copy(attachments = value.attachments.map {
+                    if (it.id == file.id) it.copy(localUrl = result.url) else it
+                }) }
+                if (sent != snapshot.sentMessages) {
+                    putSnapshot(p, threadId, snapshot.copy(sentMessages = sent), false); flushLocal(p); publish(p)
+                }
+            }
+        }
+        return result
     }
 
     private suspend fun checkpoint(link: Link) {
         val captured = mutex.withLock {
             ensureCurrent(link)
-            link.profile.serverDirty.filter { it in link.profile.ready && it !in link.profile.syncing && it !in link.profile.blocked && it in link.profile.remoteIds }
+            link.profile.serverDirty.filter { it in link.profile.ready && it !in link.profile.syncing && it !in link.profile.blocked && it in link.profile.remoteIds &&
+                link.profile.snapshots[it]?.pendingHistory == null }
                 .mapNotNull { id -> link.profile.snapshots[id]?.let { id to it } }.toMap()
         }
         if (captured.isEmpty()) return
@@ -785,6 +980,7 @@ class ConversationRepository(
             put("text", text); put("state", "prepared"); put("createdAt", System.currentTimeMillis())
             put("attachments", JsonArray(attachments.map { file -> buildJsonObject {
                 put("uri", file.uri.toString()); put("name", file.displayName); put("mimeType", primitive(file.mimeType)); put("size", file.sizeBytes?.let(::JsonPrimitive) ?: JsonNull)
+                put("uploadToOss", file.uploadToOss)
             } }))
         }
         val retainSubmission = target != null && !id.startsWith("legacy:")
@@ -806,21 +1002,27 @@ class ConversationRepository(
                     mutex.withLock {
                         require(_isConnected.value && id in target.ready && id !in target.syncing && id !in target.blocked) { "连接尚未同步，消息尚未发送" }
                         require(target.snapshots[id]?.session?.s("status") !in BUSY) { "会话正在运行，消息尚未发送" }
+                        require(target.snapshots[id]?.pendingHistory == null) { "会话历史操作尚未完成，请在桌面恢复后重新同步；消息尚未发送" }
                         require(WakuCommandPolicy.canSubmitPrompt(target.snapshots.getValue(id).pendingCommands, requestId)) { "上一项提交尚未确认，本条消息未发送" }
                     }
                     submit(link, id, text, attachments, requestId, turnId, messageId)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
+                val reason = error.message ?: "发送失败，原文已保留"
                 mutex.withLock {
                     val old = target.snapshots[id]
                     if (old != null) {
-                        val commands = old.pendingCommands.map { if (it.s("requestId") == requestId && it.s("state") == "prepared") it.patch("state" to JsonPrimitive("notSent")) else it }
+                        val commands = old.pendingCommands.map {
+                            if (it.s("requestId") == requestId && it.s("state") == "prepared") {
+                                it.patch("state" to JsonPrimitive("notSent"), "error" to JsonPrimitive(reason))
+                            } else it
+                        }
                         putSnapshot(target, id, old.copy(pendingCommands = commands), false); publish(target)
                         runCatching { flushLocal(target) }
                     }
                 }
-                showError(target, error.message ?: "发送失败，原文已保留")
+                showError(target, reason)
             }
         }.also { job ->
             if (retainSubmission) job.invokeOnCompletion { outgoingOperations.update { count -> (count - 1).coerceAtLeast(0) } }
@@ -833,13 +1035,25 @@ class ConversationRepository(
         var startDispatched = false
         var createdRuntime = false
         try {
-            val uploaded = uploadAttachments(link, attachments)
+            val prepared = uploadAttachments(link, attachments)
+            val uploaded = prepared.native
+            mutex.withLock {
+                ensureCurrent(link)
+                putSnapshot(link.profile, id, WakuMessageFiles.remember(link.profile.snapshots.getValue(id), messageId, text.trim(), prepared.files), false)
+                flushLocal(link.profile)
+            }
             var snapshot = mutex.withLock { ensureCurrent(link); link.profile.snapshots.getValue(id) }
             if (id !in link.profile.remoteIds) saveRemote(link, listOf(snapshot.session))
-            var runtimeId = mutex.withLock { link.runtimes[id]?.id }
+            var runtimeId = mutex.withLock { link.runtimes[id]?.id?.takeUnless { link.artifacts.hasExited(id, it) } }
             if (runtimeId == null) {
-                val attached = link.client.request(wakuCommand("attachSession"), id)
-                runtimeId = attached.s("runtimeId")
+                val attached = WakuRuntimeAttachment.parse(link.client.request(wakuCommand("attachSession"), id))
+                mutex.withLock {
+                    ensureCurrent(link)
+                    putSnapshot(link.profile, id, attached.applyTo(link.profile.snapshots.getValue(id)), false)
+                }
+                require(attached.pendingHistory == null) { "会话历史操作尚未完成，请在桌面恢复后重新同步；消息尚未发送" }
+                link.artifacts.onAttached(id, attached)
+                runtimeId = attached.runtimeId
                 if (runtimeId == null) {
                     val daemonSettings = link.client.request(wakuCommand("getSettings"))["settings"] as? JsonObject ?: error("无法读取服务器设置")
                     val override = (daemonSettings["provider_binary_overrides"] as? JsonObject)?.get("deerFlow") ?: JsonNull
@@ -882,7 +1096,12 @@ class ConversationRepository(
             val desiredModel = primitive(link.profile.config.modelName)
             val current = mutex.withLock {
                 ensureCurrent(link)
-                link.profile.snapshots.getValue(id).also { require(it.session.s("status") !in BUSY) { "服务器会话已开始执行；消息尚未发送" } }
+                link.profile.snapshots.getValue(id).also {
+                    require(it.session.s("status") !in BUSY) { "服务器会话已开始执行；消息尚未发送" }
+                    require(it.pendingHistory == null && id in link.profile.ready && id !in link.profile.syncing) {
+                        "会话历史正在同步或恢复，消息尚未发送"
+                    }
+                }
             }
             if (!createdRuntime && (current.session["model"] ?: JsonNull) != desiredModel) {
                 val applied = link.client.request(wakuCommand("applyOptions") {
@@ -903,6 +1122,9 @@ class ConversationRepository(
                 ensureCurrent(link)
                 val latest = link.profile.snapshots.getValue(id)
                 require(latest.session.s("status") !in BUSY) { "服务器会话已开始执行；消息尚未发送" }
+                require(latest.pendingHistory == null && id in link.profile.ready && id !in link.profile.syncing) {
+                    "会话历史正在同步或恢复，消息尚未发送"
+                }
                 putSnapshot(link.profile, id, latest.copy(session = latest.session.patch(
                     "model" to desiredModel, "runtime_mode" to JsonPrimitive(WakuToolApproval.RUNTIME_MODE),
                 )))
@@ -910,18 +1132,22 @@ class ConversationRepository(
             updatePending(link, id, requestId, "sending", uploaded)
             promptDispatched = true
             link.client.request(wakuCommand(if (uploaded.isEmpty()) "prompt" else "promptWithAttachments") {
-                put("prompt", text.trim()); put("turnId", turnId); put("messageId", messageId)
+                put("prompt", OssAttachmentEnvelope.append(text, prepared.files, prepared.ossSettings)); put("turnId", turnId); put("messageId", messageId)
                 if (uploaded.isNotEmpty()) put("attachments", JsonArray(uploaded))
             }, id, requireNotNull(runtimeId), requestId)
             updatePending(link, id, requestId, "accepted", uploaded)
             link.checkpoint.trySend(Unit)
         } catch (cancelled: CancellationException) {
-            withContext(NonCancellable) { updatePending(link, id, requestId, if (promptDispatched) "unknown" else "notSent") }
+            withContext(NonCancellable) {
+                if (!promptDispatched) removeUnsentMessage(link.profile, id, messageId)
+                updatePending(link, id, requestId, if (promptDispatched) "unknown" else "notSent")
+            }
             throw cancelled
         } catch (error: Exception) {
+            if (!promptDispatched) removeUnsentMessage(link.profile, id, messageId)
             val state = if (!promptDispatched || (error is WakuRequestException && error.delivery == WakuDelivery.NOT_SENT)) "notSent"
                 else if (error is WakuRequestException && error.delivery == WakuDelivery.REJECTED) "rejected" else "unknown"
-            updatePending(link, id, requestId, state)
+            updatePending(link, id, requestId, state, errorMessage = error.message)
             if (startDispatched && !promptDispatched && (error !is WakuRequestException || error.delivery == WakuDelivery.RESULT_UNKNOWN)) {
                 mutex.withLock {
                     link.profile.blocked[id] = "运行时启动结果未知，正在重新连接核对；消息未自动发送。"
@@ -930,6 +1156,13 @@ class ConversationRepository(
                 refresh()
             }
             throw error
+        }
+    }
+
+    private suspend fun removeUnsentMessage(p: Profile, id: String, messageId: String) = mutex.withLock {
+        val snapshot = p.snapshots[id] ?: return@withLock
+        if (messageId in snapshot.sentMessages) {
+            putSnapshot(p, id, snapshot.copy(sentMessages = snapshot.sentMessages - messageId), false)
         }
     }
 
@@ -955,6 +1188,7 @@ class ConversationRepository(
                     val runtime = mutex.withLock {
                         ensureCurrent(link)
                         require(_isConnected.value && id in p.ready && id !in p.syncing) { "连接尚未同步，操作未发送" }
+                        require(p.snapshots[id]?.pendingHistory == null) { "会话历史操作尚未完成，请在桌面恢复后重新同步；操作未发送" }
                         require(WakuCommandPolicy.canSubmitControl(p.snapshots[id]?.pendingCommands.orEmpty(), requestId, kind, target)) { "此操作已提交，请先核对结果" }
                         link.runtimes[id]?.id ?: error("会话没有可连接的运行时")
                     }
@@ -979,7 +1213,7 @@ class ConversationRepository(
             } catch (error: Exception) {
                 val state = if (!dispatched || error is WakuRequestException && error.delivery == WakuDelivery.NOT_SENT) "notSent"
                     else if (error is WakuRequestException && error.delivery == WakuDelivery.REJECTED) "rejected" else "unknown"
-                runCatching { updatePending(p, id, requestId, state) }
+                runCatching { updatePending(p, id, requestId, state, errorMessage = error.message) }
                 showError(p, error.message ?: "操作失败，请核对")
             }
         }
@@ -991,9 +1225,11 @@ class ConversationRepository(
             val snapshot = p.snapshots[p.selected] ?: return@withLock
             if (snapshot.pendingCommands.any { it.s("state") in setOf("prepared", "sending") }) {
                 _connection.value = "当前提交仍在进行，请等待结果后再核对"
+                publish(p)
                 return@withLock
             }
             putSnapshot(p, p.selected, snapshot.copy(pendingCommands = WakuCommandPolicy.acknowledge(snapshot.pendingCommands)), false)
+            if (_isConnected.value && _connection.value != "已连接") _connection.value = "已连接"
             flushLocal(p); publish(p)
         }
     }
@@ -1012,11 +1248,85 @@ class ConversationRepository(
         mutex.withLock {
             ensureCurrent(link)
             val p = link.profile
+            link.artifactJobs.remove(id)?.cancel()
             p.store.delete(id); p.snapshots.remove(id); p.catalog.remove(id); p.remoteIds -= id; p.drafts -= id
-            p.localDirty -= id; p.serverDirty -= id; p.ready -= id; p.blocked.remove(id); p.artifacts.remove(id); link.runtimes.remove(id)
+            p.localDirty -= id; p.serverDirty -= id; p.ready -= id; p.syncing -= id
+            p.blocked.remove(id); p.artifacts.remove(id); p.artifactErrors.remove(id)
+            p.syncErrors.remove(id); p.syncStatus.remove(id); link.runtimes.remove(id)
             if (p.selected == id) { p.selected = UUID.randomUUID().toString(); createDraft(p, p.selected); p.ready += p.selected }
             publish(p)
         }
+    }
+
+    fun renameThread(id: String, newTitle: String) = scope.launch {
+        if (id.startsWith("legacy:")) {
+            mutex.withLock { profile?.let { _connection.value = "旧历史只读，无法重命名"; publish(it) } }
+            return@launch
+        }
+        val trimmed = newTitle.trim()
+        if (trimmed.isEmpty()) return@launch
+        val (p, link, needsHydrate) = mutex.withLock {
+            val p = profile ?: return@launch
+            val nowSec = System.currentTimeMillis() / 1000
+            val snapshot = p.snapshots[id]
+            if (snapshot != null) {
+                val updatedSession = snapshot.session.patch("title" to JsonPrimitive(trimmed), "updated_at" to JsonPrimitive(nowSec))
+                putSnapshot(p, id, snapshot.copy(session = updatedSession), serverDirty = true)
+            }
+            p.catalog[id]?.let { summary ->
+                p.catalog[id] = summary.patch("title" to JsonPrimitive(trimmed), "updated_at" to JsonPrimitive(nowSec))
+            }
+            flushLocal(p)
+            publish(p)
+            Triple(p, active?.takeIf { it.profile === p }, id in p.remoteIds && (snapshot == null || id !in p.ready))
+        }
+        if (needsHydrate && link != null) {
+            operations.withLock {
+                runCatching { hydrateAttach(link, id) }
+                mutex.withLock {
+                    if (profile === p) {
+                        val snapshot = p.snapshots[id]
+                        if (snapshot != null) {
+                            val nowSec = System.currentTimeMillis() / 1000
+                            val updatedSession = snapshot.session.patch("title" to JsonPrimitive(trimmed), "updated_at" to JsonPrimitive(nowSec))
+                            putSnapshot(p, id, snapshot.copy(session = updatedSession), serverDirty = true)
+                            p.catalog[id] = p.catalog[id]?.patch("title" to JsonPrimitive(trimmed), "updated_at" to JsonPrimitive(nowSec)) ?: updatedSession
+                            flushLocal(p)
+                            publish(p)
+                        }
+                    }
+                }
+            }
+        }
+        active?.takeIf { it.profile === p }?.checkpoint?.trySend(Unit)
+    }
+
+    suspend fun takeRestorablePrompt(id: String): Pair<String, List<PendingAttachment>>? = mutex.withLock {
+        val p = profile ?: return@withLock null
+        val snapshot = p.snapshots[id] ?: return@withLock null
+        if (snapshot.pendingCommands.any { it.s("state") in setOf("prepared", "sending") }) {
+            _connection.value = "当前提交仍在进行，请等待结果后再恢复"
+            publish(p)
+            return@withLock null
+        }
+        val promptCmd = snapshot.pendingCommands.firstOrNull { it.s("kind") == "prompt" } ?: return@withLock null
+        val text = promptCmd.s("text").orEmpty()
+        val attachments = promptCmd.objs("attachments").mapNotNull { item ->
+            val uriStr = item.s("uri")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val uri = runCatching { Uri.parse(uriStr) }.getOrNull() ?: return@mapNotNull null
+            PendingAttachment(
+                uri = uri,
+                displayName = item.s("name").orEmpty().ifBlank { "attachment" },
+                mimeType = item.s("mimeType"),
+                sizeBytes = (item["size"] as? JsonPrimitive)?.content?.toLongOrNull(),
+                uploadToOss = (item["uploadToOss"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false,
+            )
+        }
+        putSnapshot(p, id, snapshot.copy(pendingCommands = WakuCommandPolicy.acknowledge(snapshot.pendingCommands)), false)
+        if (_isConnected.value && _connection.value != "已连接") _connection.value = "已连接"
+        flushLocal(p)
+        publish(p)
+        text to attachments
     }
 
     private fun userOperation(action: suspend (Link, String) -> Unit): Job {
@@ -1049,45 +1359,72 @@ class ConversationRepository(
         hadPrevious
     }
 
-    private suspend fun updatePending(link: Link, id: String, requestId: String, state: String, attachments: List<JsonObject>? = null) =
-        updatePending(link.profile, id, requestId, state, attachments)
+    private suspend fun updatePending(
+        link: Link,
+        id: String,
+        requestId: String,
+        state: String,
+        attachments: List<JsonObject>? = null,
+        errorMessage: String? = null,
+    ) = updatePending(link.profile, id, requestId, state, attachments, errorMessage)
 
-    private suspend fun updatePending(p: Profile, id: String, requestId: String, state: String, attachments: List<JsonObject>? = null) = mutex.withLock {
+    private suspend fun updatePending(
+        p: Profile,
+        id: String,
+        requestId: String,
+        state: String,
+        attachments: List<JsonObject>? = null,
+        errorMessage: String? = null,
+    ) = mutex.withLock {
         // An interrupted operation can still update its own profile cache, never the currently selected profile.
         val snapshot = p.snapshots[id] ?: return@withLock
         val commands = snapshot.pendingCommands.map { command ->
             if (command.s("requestId") != requestId) command else JsonObject(command.toMutableMap().apply {
-                put("state", JsonPrimitive(state)); attachments?.let { put("uploadedAttachments", JsonArray(it)) }
+                put("state", JsonPrimitive(state))
+                attachments?.let { put("uploadedAttachments", JsonArray(it)) }
+                if (!errorMessage.isNullOrBlank()) put("error", JsonPrimitive(errorMessage))
+                else if (state in setOf("sending", "accepted")) remove("error")
             })
         }
         putSnapshot(p, id, snapshot.copy(pendingCommands = commands), false)
-        if (profile === p) publish(p)
+        if (profile === p) {
+            if (state == "accepted" && _isConnected.value && _connection.value != "已连接") _connection.value = "已连接"
+            publish(p)
+        }
         flushLocal(p)
     }
 
-    private suspend fun uploadAttachments(link: Link, files: List<PendingAttachment>): List<JsonObject> {
+    private class PreparedFiles(val native: List<JsonObject>, val files: List<MessageFile>, val ossSettings: com.deerflow.app.data.oss.S3Settings)
+
+    private suspend fun uploadAttachments(link: Link, files: List<PendingAttachment>): PreparedFiles {
         require(files.size <= 8) { "每条消息最多添加 8 个附件" }
+        val ossSettings = settings.currentOss()
+        if (files.any { it.uploadToOss }) require(ossSettings.configured) { "请先在设置中配置 OSS 账号，或切换为上传到服务器" }
+        val native = mutableListOf<JsonObject>()
+        val cache = messageCache(link.profile)
         var total = 0L
-        return files.map { pending ->
+        var ossTotal = 0L
+        val displayed = files.map { pending ->
             ensureCurrent(link)
-            require(pending.sizeBytes == null || pending.sizeBytes <= 8L * 1024 * 1024) { "附件最大 8 MiB：${pending.displayName}" }
-            val data = appContext.contentResolver.openInputStream(pending.uri)?.use { input ->
-                val out = ByteArrayOutputStream()
-                val buffer = ByteArray(8192)
-                var size = 0
-                while (true) {
-                    val count = input.read(buffer, 0, minOf(buffer.size, 8 * 1024 * 1024 + 1 - size))
-                    if (count < 0) break
-                    size += count
-                    require(size <= 8 * 1024 * 1024 && total + size <= 16L * 1024 * 1024) { "附件超过 8 MiB 单文件或 16 MiB 总量限制" }
-                    out.write(buffer, 0, count)
-                }
-                out.toByteArray()
-            } ?: error("无法读取附件：${pending.displayName}")
-            total += data.size
             val name = pending.displayName.substringAfterLast('/').substringAfterLast('\\').ifBlank { "attachment" }
+            val mime = pending.mimeType ?: "application/octet-stream"
             val isImage = pending.mimeType?.startsWith("image/") == true
-            val encoded = Base64.getEncoder().encodeToString(data)
+            val maximum = if (pending.uploadToOss) { if (isImage) 20L * 1024 * 1024 else S3Storage.MAX_FILE_BYTES } else 8L * 1024 * 1024
+            require(pending.sizeBytes == null || pending.sizeBytes <= maximum) { "附件超过当前上传方式的单文件上限：$name" }
+            val staged = appContext.contentResolver.openInputStream(pending.uri)?.use { cache.stage(it, name, maximum) }
+                ?: error("无法读取附件：$name")
+            val fileId = UUID.randomUUID().toString()
+            val base = MessageFile(fileId, name, mime, staged.size, staged.file.toURI().toString(), sha256 = staged.sha256)
+            if (pending.uploadToOss) {
+                ossTotal += staged.size
+                require(ossTotal <= 100L * 1024 * 1024) { "每条消息的 OSS 附件总量最多 100 MiB" }
+                val safeName = staged.file.name.substringAfter('-')
+                val obj = S3Storage().upload(ossSettings, staged.file, "deerflow-app/attachments/$fileId/$safeName", name, mime)
+                return@map base.copy(oss = obj)
+            }
+            total += staged.size
+            require(total <= 16L * 1024 * 1024) { "每条消息上传到服务器的附件总量最多 16 MiB" }
+            val encoded = Base64.getEncoder().encodeToString(staged.file.readBytes())
             val result = if (isImage) link.client.request(wakuCommand("storeBlob") {
                 put("mimeType", pending.mimeType!!); put("bytes", encoded)
             }, timeoutMs = 120_000) else link.client.request(wakuCommand("importAttachment") {
@@ -1096,10 +1433,12 @@ class ConversationRepository(
             val stored = if (isImage) result else result["attachment"] as? JsonObject ?: error("附件上传未返回引用")
             val path = stored.s("path") ?: error("附件缺少服务器路径")
             val reference = stored.s("reference") ?: error("附件缺少服务器引用")
-            buildJsonObject {
+            native += buildJsonObject {
                 put("path", path); put("mention", path); put("name", name); put("is_dir", false); put("is_image", isImage); put("blob_reference", reference)
             }
+            base.copy(serverReference = reference, serverPath = path)
         }
+        return PreparedFiles(native, displayed, ossSettings)
     }
 
     private fun createDraft(p: Profile, id: String) {
@@ -1115,6 +1454,7 @@ class ConversationRepository(
     }
     private fun putSnapshot(p: Profile, id: String, snapshot: WakuSnapshot, serverDirty: Boolean = true) {
         p.snapshots[id] = snapshot; p.localDirty += id
+        p.artifacts[id] = snapshot.artifactFiles
         if (serverDirty) p.serverDirty += id
     }
     private fun flushLocal(p: Profile) {
@@ -1147,30 +1487,34 @@ class ConversationRepository(
         )
         val snapshot = p.snapshots[p.selected]
         val readOnly = p.selected.startsWith("legacy:")
-        _state.value = if (readOnly) legacyStates.getOrPut(p.selected) { readLegacy(p.selected) } else snapshot?.let { WakuProjection.display(it).appendArtifacts(p.artifacts[p.selected].orEmpty()) }
+        _state.value = if (readOnly) legacyStates.getOrPut(p.selected) { readLegacy(p.selected) } else snapshot?.let { WakuProjection.display(it) }
             ?: ConversationState(p.selected, status = "正在加载会话…")
         p.blocked[p.selected]?.let { _state.value = _state.value.copy(status = it) }
+        snapshot?.pendingHistory?.let {
+            _state.value = _state.value.copy(status = "会话历史操作尚未完成，请在桌面恢复后重新同步。")
+        }
         p.syncErrors[p.selected]?.let { _state.value = _state.value.copy(status = it) }
         if (p.selected in p.syncing) _state.value = _state.value.copy(status = p.syncStatus[p.selected] ?: "正在同步会话…")
-        p.artifactErrors[p.selected]?.let { error ->
-            _state.value = _state.value.upsert("waku:artifact-error", BlockKind.ERROR, "产物", error)
-        }
-        val actionsReady = p.selected in p.ready && p.selected !in p.syncing && snapshot?.interactionsVerified == true
+        _taskFiles.value = TaskFilesState(p.artifacts[p.selected].orEmpty(),
+            active?.takeIf { it.profile === p }?.artifactJobs?.get(p.selected)?.isActive == true,
+            p.artifactErrors[p.selected])
+        val actionsReady = p.selected in p.ready && p.selected !in p.syncing && snapshot?.interactionsVerified == true && snapshot.pendingHistory == null
         _pendingPermissions.value = if (actionsReady) snapshot?.permissions.orEmpty() else emptyList()
         _pendingQuestions.value = if (actionsReady) snapshot?.userInputs.orEmpty() else emptyList()
         _unknownSubmission.value = snapshot?.pendingCommands?.filter { it.s("kind") == "prompt" || it.s("state") in setOf("unknown", "notSent", "rejected") }
             ?.takeIf { it.isNotEmpty() }?.joinToString("\n\n") { command ->
+            val reason = command.s("error")?.takeIf { it.isNotBlank() }
             val state = when (command.s("state")) {
-                "notSent" -> "消息未发送，原文已保留"
-                "rejected" -> "服务器拒绝了操作，原文已保留"
+                "notSent" -> reason?.let { "消息未发送：$it" } ?: "消息未发送，原文已保留"
+                "rejected" -> reason?.let { "服务器拒绝了操作：$it" } ?: "服务器拒绝了操作，原文已保留"
                 "accepted" -> "服务器已接受，等待事件确认；没有自动重发"
                 "prepared", "sending" -> "正在提交；中断后请核对服务器状态"
-                else -> "操作结果未知，请先核对服务器；没有自动重发"
+                else -> reason?.let { "操作结果未知（$it），请先核对服务器；没有自动重发" } ?: "操作结果未知，请先核对服务器；没有自动重发"
             }
-            state + command.s("text")?.let { "\n$it" }.orEmpty()
+            state + command.s("text")?.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
         }
         _canSend.value = _isConnected.value && !readOnly && p.selected in p.ready && p.selected !in p.syncing &&
-            p.selected !in p.blocked && snapshot != null && snapshot.session.s("status") !in BUSY && snapshot.pendingCommands.isEmpty()
+            p.selected !in p.blocked && snapshot != null && snapshot.pendingHistory == null && snapshot.session.s("status") !in BUSY && snapshot.pendingCommands.isEmpty()
         selection = Selection(p, p.selected)
     }
 

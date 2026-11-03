@@ -29,6 +29,45 @@ class WakuRecoveryTest {
         assertEquals("remote title", chosen.session.string("title"))
     }
 
+    @Test fun `rewind revision replaces larger obsolete cursor and clears old interaction state`() {
+        val command = buildJsonObject { put("kind", "prompt"); put("messageId", "unconfirmed") }
+        val permission = buildJsonObject { put("requestId", "old-approval") }
+        val local = WakuProjection.fromSession(session(999).updated("messages" to JsonArray(listOf(
+            buildJsonObject { put("id", "removed-by-rewind") },
+        )))).copy(permissions = listOf(permission), userInputs = listOf(permission),
+            pendingCommands = listOf(command), taskReady = permission, interactionReplay = WakuControlCheckpoint())
+        val remote = session(4).updated("history_revision" to JsonPrimitive(1))
+        assertTrue(WakuRecovery.needsHistoryRefresh(local.session, remote))
+        val chosen = WakuRecovery.chooseSnapshot(local, remote)
+        assertEquals(1L, WakuRecovery.historyRevision(chosen.session))
+        assertEquals(4L, chosen.cursor!!.long("sequence"))
+        assertTrue(chosen.session.array("messages").isEmpty())
+        assertTrue(chosen.permissions.isEmpty())
+        assertTrue(chosen.userInputs.isEmpty())
+        assertNull(chosen.taskReady)
+        assertNull(chosen.interactionReplay)
+        assertEquals(listOf(command), chosen.pendingCommands)
+    }
+
+    @Test fun `late snapshot cannot undo a newer history revision`() {
+        val local = WakuProjection.fromSession(session(4).updated("history_revision" to JsonPrimitive(2)))
+        val obsolete = session(999).updated("history_revision" to JsonPrimitive(1))
+        assertSame(local, WakuRecovery.chooseSnapshot(local, obsolete))
+        assertEquals(local.session, WakuSessionTitles.mergeMetadata(local.session, obsolete, fullSnapshot = true))
+        assertFalse(WakuRecovery.localStreamAhead(local.session, obsolete))
+    }
+
+    @Test fun `catalog revision is not applied without its matching full history`() {
+        val local = session(50)
+        val summary = session(0, "rewound").updated("history_revision" to JsonPrimitive(1))
+        assertEquals(local, WakuSessionTitles.mergeMetadata(local, summary))
+        assertFalse(WakuSessionTitles.needsDetails(local, summary))
+        assertTrue(WakuRecovery.needsHistoryRefresh(local, summary))
+        val legacy = JsonObject(local - "history_revision")
+        assertEquals(0L, WakuRecovery.historyRevision(legacy))
+        assertFalse(WakuRecovery.needsHistoryRefresh(legacy, local))
+    }
+
     @Test fun `new daemon snapshot replaces obsolete epoch even if local sequence is larger`() {
         val chosen = WakuRecovery.chooseSnapshot(WakuProjection.fromSession(session(999)), session(1, epoch = "new"))
         assertEquals("new", chosen.cursor!!.string("epoch"))

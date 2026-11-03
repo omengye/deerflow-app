@@ -2,7 +2,7 @@
 
 ## 决策
 
-Android 直接实现当前 `deerflow-api` 分支的 Waku v10 客户端，使用 `/v1` WebSocket；由 Waku daemon 管理 DeerFlow Go runtime，手机承担会话展示、用户命令、审批和本地恢复。此次直接替换 AG-UI 网络入口，不做灰度或双协议路由。旧记录只读保留。
+Android 直接实现当前 `deerflow-api` 分支的 Waku v12 客户端，使用 `/v1` WebSocket；由 Waku daemon 管理 DeerFlow Go runtime，手机承担会话展示、用户命令、审批和本地恢复。旧 AG-UI 记录只读保留。
 
 协议基线来自本地 `deerflow-api` 的 `desktop-app/crates/waku-protocol/src/protocol.rs`、`desktop-app/crates/waku-core/src/daemon.rs`、`desktop-app/packages/waku-client/src/generated/AgentSession.ts` 以及 `desktop-app/apps/mobile/src/lib/daemon-api.ts`。这是 tagged JSON 命令/响应/事件协议，不是直接兼容 Codex JSON-RPC 的接口；不能只替换原 SSE URL。
 
@@ -38,7 +38,17 @@ flowchart LR
 4. 从已保存游标开始，固定 `throughSequence`，以每页最多 64 个事件增量读取；每页响应有 30 秒超时。同期实时事件进入有限缓冲，按 session/runtime/epoch/sequence 验证并去重后接入。
 5. 每页的内容与游标写入同一原子文件后才请求下一页，中断后不从零重放。会话单独解锁；同一会话的并发恢复共用结果，失败不会被误判为已完成。同步进度与错误在会话状态栏显示。
 
-当前 v10 的审批请求不在服务端会话快照中。只有处于 waiting 且本地交互状态未经验证时才单独补读控制历史，控制游标逐页落盘；补读完成前不显示未经核对的交互卡。任务产物的 Ready 信息另行缓存，缺失时在后台补读，也保存进度。runtime/epoch 变化会丢弃旧权限和产物连接信息。若 runtime 已不存在，清理过期交互卡。原生历史导入只用于正文与工具块都缺失的快照。
+当前 v12 的审批请求仍不在服务端会话快照中。只有处于 waiting 且本地交互状态未经验证时才单独补读控制历史，控制游标逐页落盘；补读完成前不显示未经核对的交互卡。`attachSession.deerflowReady` 优先恢复当前产物连接，历史 Ready 不能覆盖该快照，新实时 Ready 可以更新连接。`invalidated` 只表示任务数据需要刷新，保留绑定、能力和在途查询；每次产物读取都会重新查询任务树和产物页。只有 runtime 退出、更换或 epoch 变化才清除过期连接信息，已下载的文件缓存保留。缺少连接信息时才在后台补读产物控制历史，也保存进度。若 runtime 已不存在，清理过期交互卡。原生历史导入只用于正文与工具块都缺失的快照。
+
+2.2.0 曾把 `invalidated` 错当成能力撤销，可能保存了有效游标但缺少 Ready 的控制检查点。2.2.1 先完成已保存位置后的增量查询；仍缺少 Ready 时，最多再从头执行一次只读恢复，重建原始能力声明。每页仍原子保存，不重发 prompt、审批或执行命令。运行时退出会撤销读取能力并停止自动产物查询；没有产物的正常查询返回空列表。
+
+## v12 历史修订与会话元数据
+
+新会话带有 `history_revision = 0`；旧版 Android 快照没有此字段时按 0 读取。修订号由 daemon 管理，只能与对应的完整正文一起更新。目录通知发现更高修订后，立即暂停该会话的发送、旧投影上报和文件读取；选中或已订阅的会话重新 hydrate／attach，其他会话在打开时恢复。目录的空正文和游标不覆盖完整缓存，标题补读也不能单独推进历史修订。
+
+比较快照时，历史修订优先于事件 sequence。更高服务端修订清除旧审批、控制检查点和产物连接，保留待核对用户命令；迟到的低修订快照不能恢复旧轮次。完整历史读取后再次 attach，避免桌面回退恰好发生在读取期间而将旧 runtime 日志接到新正文上。
+
+`attachSession.pendingHistory` 保存于本地原子快照，表示 daemon 尚未完成的回退或分叉操作；存在时不发送 prompt、审批和后台投影，显示在桌面恢复后重新同步的提示。它不提供待审批快照。`conversationCapability` 以本次 attach／实时事件为准，runtime 更换或退出时清除。手机接收 `steeringUpdated` 并以 request ID 更新同一条用户消息，保留干预状态与原文；本次协议迁移未添加手机主动干预、分叉、回退或预算编辑入口。
 
 连接输入由实际配置、后台保留策略、原子的网络状态及显式刷新序号组成。相同配置去重，因此记忆回执落盘不会取消聊天订阅；网络切换仍会更换连接。迟到页在取消或链接身份检查失败后不能提交。
 
@@ -71,6 +81,12 @@ Android 契约参考：[服务类型](https://developer.android.com/develop/back
 发送前先原子保存原文、附件引用及命令 ID，再上传附件、发送 prompt。只有本地保存成功才清空输入框。断线后不自动重发 prompt、审批或取消；通过精确 message ID 核对 prompt，不能按相同文字猜测已经发送。
 
 请求失败区分确定未发送、服务端拒绝、结果未知。结果未知保留原文和提示，后续动作由用户显式发起。附件上传失败不降级成只发文字。产物按服务器授权读取，校验大小、偏移及摘要后保存到客户端私有缓存；外部 URL 不携带 daemon Token。
+
+2.3.0 的产物索引保存在会话本地快照 `artifactFiles` 中，`listArtifacts` 只查任务树和元数据，不读取文件分块。聊天投影不再追加文件卡或产物读取错误；独立页面通过 `loadArtifact` 下载所选文件，离线时可使用已校验缓存。
+
+新提交附件先复制到按服务器凭据隔离的私有缓存，并在发送 prompt 前将原文和附件信息写入 `sentMessages[messageId]`。事件回显、完整历史同步和 runtime 更换均保留该表，只按精确 ID 绑定；历史回退移除的消息不会因附件缓存而重新显示。普通文件沿用 `storeBlob/importAttachment` 与原生 `MessageAttachment`，无需服务端协议变更。
+
+OSS 路径由 App 直传文件，向 Agent 提交带大小、SHA-256、预签名 GET 和指定客户端标识的版本化清单。只读链接默认有效 24 小时；长期密钥只留在设备加密设置中。Agent 通过已有 `skill_run` 下载到会话输入目录并读取，生成产物仍由服务端保管。App 不把 OSS 对象冒充原生服务器附件；可见用户消息使用发送前保存的原文。
 
 ## 工具调用展示
 

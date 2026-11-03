@@ -44,7 +44,7 @@ class WakuSlowSocketRecoveryTest {
                     override fun onMessage(webSocket: WebSocket, text: String) {
                         val wire = WakuJson.parseToJsonElement(text).jsonObject
                         if (wire.string("type") == "hello") {
-                            webSocket.send("""{"type":"hello","protocolVersion":10,"daemonVersion":"synthetic"}""")
+                            webSocket.send("""{"type":"hello","protocolVersion":12,"daemonVersion":"synthetic"}""")
                             return
                         }
                         val command = wire["command"]!!.jsonObject

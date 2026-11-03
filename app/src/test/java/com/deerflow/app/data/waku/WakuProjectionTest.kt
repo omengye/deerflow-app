@@ -10,12 +10,13 @@ class WakuProjectionTest {
     private val initial get() = WakuProjection.bindRuntime(
         WakuProjection.fromSession(WakuProjection.createSession("session", "project", nowMillis = 1_000)), "runtime")
 
-    @Test fun creationMatchesWakuV10WireFixture() {
+    @Test fun creationMatchesWakuV12WireFixture() {
         val sessionId = "00000000-0000-0000-0000-000000000001"
         val projectId = "00000000-0000-0000-0000-000000000002"
         val project = WakuProjection.createProject(projectId, "Project", "/workspace", 1_700_000_000_123)
         val session = WakuProjection.createSession(sessionId, projectId, "test-model", 1_700_000_000_123)
         assertEquals("deerFlow", session["provider"]!!.jsonPrimitive.content)
+        assertEquals(0L, session["history_revision"]!!.jsonPrimitive.long)
         assertEquals("fullAccess", session["runtime_mode"]!!.jsonPrimitive.content)
         assertEquals("local", session["workspace"]!!.jsonObject["kind"]!!.jsonPrimitive.content)
         assertEquals(1_700_000_000L, session["created_at"]!!.jsonPrimitive.long)
@@ -203,6 +204,48 @@ class WakuProjectionTest {
         val continued = reduce(hydrated, 3, "textDelta", JsonPrimitive(" end"))
         assertEquals("partial end", messages(continued).last()["content"]!!.jsonPrimitive.content)
         assertEquals(messages(snapshot).last()["id"], messages(continued).last()["id"])
+    }
+
+    @Test fun steeringStatusUpdatesFromAnotherClientKeepOneStableMessage() {
+        val request = "00000000-0000-0000-0000-000000000123"
+        val started = reduce(initial, 1, "promptSubmitted", prompt("turn", "user", "work"))
+        fun update(status: String) = buildJsonObject {
+            put("requestId", request); put("runId", "run"); put("status", status); put("message", "Check the tests")
+        }
+        val accepted = reduce(started, 2, "steeringUpdated", update("accepted"))
+        val applied = reduce(accepted, 3, "steeringUpdated", update("applied"))
+        val intervention = messages(applied).single { it.string("id") == request }
+        assertEquals("Check the tests", intervention.string("content"))
+        assertEquals("Intervention applied\n\nCheck the tests", intervention.string("display_content"))
+        assertEquals("turn", intervention.string("turn_id"))
+        assertEquals(2, messages(applied).size)
+        assertEquals(applied, reduce(applied, 3, "steeringUpdated", update("applied")))
+        assertEquals(1, applied.session.array("turns").size)
+    }
+
+    @Test fun conversationCapabilityExpiresWithItsRuntime() {
+        val supported = reduce(initial, 1, "conversationCapability", buildJsonObject { put("supported", true) })
+        assertTrue(supported.session.bool("conversation_capability"))
+        assertEquals(JsonNull, WakuProjection.bindRuntime(supported, "replacement").session["conversation_capability"])
+        assertEquals(JsonNull, reduce(supported, 2, "processExited").session["conversation_capability"])
+    }
+
+    @Test fun taskDataInvalidationPreservesReadyInBothDurableRecoveryPathsUntilProcessExit() {
+        fun payload(kind: String, connection: String = "current") = buildJsonObject {
+            put("kind", kind); put("connectionId", connection); put("sessionId", "acp-session")
+        }
+        val ready = event(1, "deerflowTasks", payload("ready"))
+        val unrelated = event(2, "deerflowTasks", payload("invalidated", "obsolete"))
+        val invalidated = event(3, "deerflowTasks", payload("invalidated"))
+        val snapshot = WakuProjection.reduce(initial, ready)
+        assertEquals(ready, WakuProjection.reduce(snapshot, unrelated).taskReady)
+        assertEquals(ready, WakuProjection.reduce(snapshot, invalidated).taskReady)
+        val checkpoint = WakuControlCheckpoint().advance(
+            WakuReplayPage(WakuReplayPosition("runtime", "epoch", 3), 3, listOf(ready, unrelated, invalidated), false))
+        assertEquals(ready, checkpoint.taskReady)
+        val exited = event(4, "processExited", JsonNull)
+        assertNull(WakuProjection.reduce(snapshot, exited).taskReady)
+        assertNull(checkpoint.advance(WakuReplayPage(WakuReplayPosition("runtime", "epoch", 4), 4, listOf(exited), false)).taskReady)
     }
 
     private fun reduce(snapshot: WakuSnapshot, seq: Long, kind: String, payload: JsonElement = JsonNull, epoch: String = "epoch") =

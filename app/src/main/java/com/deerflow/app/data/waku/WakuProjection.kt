@@ -24,16 +24,19 @@ data class WakuSnapshot(
     val interactionReplay: WakuControlCheckpoint? = null,
     val artifactReplay: WakuControlCheckpoint? = null,
     val taskReady: JsonObject? = null,
+    val pendingHistory: JsonObject? = null,
+    val sentMessages: Map<String, WakuSentMessage> = emptyMap(),
+    val artifactFiles: List<com.deerflow.app.domain.model.AgentArtifact> = emptyList(),
 )
 
-/** Waku v10 wire projection. Unknown session fields survive round trips unchanged. */
+/** Waku v12 wire projection. Unknown session fields survive round trips unchanged. */
 object WakuProjection {
     fun createProject(id: String, name: String, path: String, nowMillis: Long = System.currentTimeMillis()) = buildJsonObject {
         put("id", id); put("name", name); put("path", path); put("created_at", nowMillis / 1000)
     }
 
     fun createSession(id: String, projectId: String, model: String? = null, nowMillis: Long = System.currentTimeMillis()) = buildJsonObject {
-        put("id", id); put("title", "New task"); put("auto_title", JsonNull)
+        put("id", id); put("history_revision", 0); put("title", "New task"); put("auto_title", JsonNull)
         put("project_id", projectId); put("workspace", obj("kind" to JsonPrimitive("local")))
         put("provider", "deerFlow"); put("model", primitive(model)); put("runtime_mode", WakuToolApproval.RUNTIME_MODE)
         put("reasoning_effort", JsonNull); put("thinking_mode", JsonNull); put("service_tier", JsonNull)
@@ -58,7 +61,7 @@ object WakuProjection {
     fun bindRuntime(snapshot: WakuSnapshot, runtimeId: String): WakuSnapshot {
         if (snapshot.runtimeId == runtimeId) return snapshot
         return snapshot.copy(runtimeId = runtimeId, cursor = null, permissions = emptyList(), userInputs = emptyList(),
-            retiredEpochs = emptyList(), session = snapshot.session.changed("runtime_event_cursor" to JsonNull),
+            retiredEpochs = emptyList(), session = snapshot.session.changed("runtime_event_cursor" to JsonNull, "conversation_capability" to JsonNull),
             interactionsVerified = false, interactionReplay = null, artifactReplay = null, taskReady = null)
     }
 
@@ -82,6 +85,7 @@ object WakuProjection {
         var userInputs = if (epochChanged) emptyList() else snapshot.userInputs
         if (epochChanged) mutable.finishStreams()
         when (kind) {
+            "conversationCapability" -> mutable.values["conversation_capability"] = JsonPrimitive(data?.flag("supported") == true)
             "connected" -> {
                 mutable.values["provider_cursor"] = payload
                 if (mutable.status == "connecting") mutable.status = "working"
@@ -106,6 +110,7 @@ object WakuProjection {
                 mutable.values["context_usage"] = JsonObject(usage)
             }
             "promptSubmitted" -> if (data != null) mutable.prompt(data)
+            "steeringUpdated" -> if (data != null) mutable.steering(data)
             "turnStarted" -> mutable.startTurn()
             "textDelta" -> payload.stringOrNull()?.let { mutable.text(it) }
             "reasoningDelta" -> payload.stringOrNull()?.let { mutable.reasoning(it) }
@@ -118,7 +123,7 @@ object WakuProjection {
                 userInputs = userInputs.filterNot { it.text("requestId") == data.text("requestId") } + data
                 mutable.status = "waiting"
             }
-            // Supported for a future server capability; current v10 resolves at the turn boundary.
+            // Reserved for a future server capability; v12 still resolves at the turn boundary.
             "permissionResolved" -> permissions = permissions.filterNot { it.text("requestId") == data?.text("requestId") }
             "userInputResolved" -> userInputs = userInputs.filterNot { it.text("requestId") == data?.text("requestId") }
             "turnParked" -> { mutable.finishStreams(); mutable.status = "background" }
@@ -128,6 +133,7 @@ object WakuProjection {
             }
             "processExited" -> {
                 if (mutable.runningTurn != null) mutable.finishTurn("failed", "Agent process exited before completion.")
+                mutable.values["conversation_capability"] = JsonNull
                 permissions = emptyList(); userInputs = emptyList()
             }
             "error" -> payload.stringOrNull()?.let { mutable.error(it) }
@@ -135,12 +141,18 @@ object WakuProjection {
         val cursor = obj("sessionId" to JsonPrimitive(sessionId), "runtimeId" to JsonPrimitive(runtimeId),
             "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
         mutable.values["runtime_event_cursor"] = obj("runtime_id" to JsonPrimitive(runtimeId), "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
-        return snapshot.copy(session = WakuSessionTitles.withFallback(mutable.build()), permissions = permissions, userInputs = userInputs, cursor = cursor,
+        val projected = if (kind == "promptSubmitted") WakuMessageFiles.materialize(snapshot.copy(session = mutable.build())).session else mutable.build()
+        return snapshot.copy(session = WakuSessionTitles.withFallback(projected), permissions = permissions, userInputs = userInputs, cursor = cursor,
             runtimeId = runtimeId, retiredEpochs = if (epochChanged) (snapshot.retiredEpochs + listOfNotNull(previous?.text("epoch"))).distinct() else snapshot.retiredEpochs,
             interactionsVerified = (snapshot.interactionsVerified && !epochChanged) || kind in setOf("promptSubmitted", "turnStarted", "turnFinished", "processExited"),
             interactionReplay = if (epochChanged) null else snapshot.interactionReplay,
-            artifactReplay = if (epochChanged) null else snapshot.artifactReplay,
-            taskReady = if (kind == "deerflowTasks" && data?.text("kind") == "ready") wire else if (epochChanged) null else snapshot.taskReady)
+            artifactReplay = if (epochChanged || kind == "processExited") null else snapshot.artifactReplay,
+            taskReady = when {
+                kind == "deerflowTasks" && data?.text("kind") == "ready" -> wire
+                kind == "processExited" -> null
+                epochChanged -> null
+                else -> snapshot.taskReady
+            })
     }
 
     fun display(snapshot: WakuSnapshot): ConversationState {
@@ -185,8 +197,10 @@ object WakuProjection {
             val role = message.text("role") ?: "assistant"
             val id = message.text("id") ?: stableId("${session.text("id")}/message/$index")
             val kind = when (role) { "user" -> BlockKind.USER; "system" -> BlockKind.SYSTEM; else -> BlockKind.ASSISTANT }
+            val submitted = snapshot.sentMessages[id]
             blocks += DisplayBlock("waku:message:$id", kind, if (role == "user") "You" else "Assistant",
-                message.text("display_content") ?: message.text("content").orEmpty(), messageId = id, turnIndex = turns[message.text("turn_id")])
+                submitted?.text ?: message.text("display_content") ?: message.text("content").orEmpty(), messageId = id,
+                turnIndex = turns[message.text("turn_id")], attachments = submitted?.attachments.orEmpty())
             appendWork(index + 1)
         }
         val status = session.text("status") ?: "idle"
@@ -219,6 +233,23 @@ object WakuProjection {
         fun newTurn(turnId: String, started: Boolean) = obj("id" to JsonPrimitive(turnId), "turn_count" to JsonPrimitive(turns.size + 1),
             "status" to JsonPrimitive("running"), "provider_turn_started" to JsonPrimitive(started), "provider_resume_at" to JsonNull,
             "started_at" to JsonPrimitive(now / 1000), "completed_at" to JsonNull, "checkpoint" to JsonNull)
+        fun steering(data: JsonObject) {
+            val requestId = data.text("requestId")?.let { runCatching { UUID.fromString(it).toString() }.getOrNull() } ?: return
+            val text = data.text("message") ?: return
+            val label = when (data.text("status")) {
+                "accepted" -> "Intervention accepted · awaiting next model decision"
+                "applied" -> "Intervention applied"
+                "rejected" -> "Intervention rejected"
+                "pending" -> "Submitting intervention"
+                else -> "Intervention status unknown · reconnect to check"
+            }
+            val reason = data.text("reason").orEmpty()
+            val visible = (if (reason.isEmpty()) label else "$label: $reason") + "\n\n$text"
+            val index = messages.indexOfFirst { it.text("id") == requestId }
+            if (index >= 0) messages[index] = messages[index].changed("display_content" to JsonPrimitive(visible))
+            else messages += message(requestId, runningTurn?.text("id"), "user", text, false)
+                .changed("display_content" to JsonPrimitive(visible))
+        }
         fun startTurn() {
             if (runningTurn == null) turns += newTurn(id("turn"), true)
             else turns[turns.lastIndex] = turns.last().changed("provider_turn_started" to JsonPrimitive(true))
