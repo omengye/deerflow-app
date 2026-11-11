@@ -31,11 +31,17 @@ data class SkillProposal(
     val baseSha256: String? = null,
     @SerialName("candidate_sha256")
     val candidateSha256: String? = null,
-    val risk: String = "medium",
     @SerialName("changed_files")
     val changedFiles: List<String> = emptyList(),
-    val scans: List<JsonObject> = emptyList(),
-    val evaluation: JsonObject = JsonObject(emptyMap()),
+    val evaluation: SkillEvaluation = SkillEvaluation(),
+    val lifecycle: CandidateLifecycle? = null,
+    val target: SkillTarget? = null,
+    val base: SkillHead? = null,
+    @SerialName("reviewed_by") val reviewedBy: String? = null,
+    @SerialName("validation_failure") val validationFailure: JsonObject? = null,
+    @SerialName("file_publication_pending") val filePublicationPending: Boolean = false,
+    @SerialName("publication_error") val publicationError: String? = null,
+    @SerialName("content_expired") val contentExpired: Boolean = false,
     @SerialName("created_at")
     val createdAt: String = "",
     @SerialName("updated_at")
@@ -61,22 +67,8 @@ data class SkillProposal(
 @Serializable
 data class ProposalListResponse(
     val proposals: List<SkillProposal> = emptyList(),
+    @SerialName("next_cursor") val nextCursor: String? = null,
     @SerialName("catalog_version")
-    val catalogVersion: Int? = null,
-)
-
-@Serializable
-data class ProposalReviewRequest(
-    @SerialName("expected_base_sha256")
-    val expectedBaseSha256: String? = null,
-    val note: String? = null,
-)
-
-@Serializable
-data class ProposalReviewResponse(
-    val success: Boolean = false,
-    val proposal: SkillProposal,
-    @SerialName("catalog_version")
-    val catalogVersion: Int? = null,
+    val catalogVersion: Long? = null,
 )
 

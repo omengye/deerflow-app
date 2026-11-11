@@ -65,6 +65,18 @@ object WakuRecovery {
         return WakuMessageFiles.materialize(snapshot.copy(pendingCommands = remaining))
     }
 
+    /** After recovery, an old ACK without a matching message must retain a way to resolve it. */
+    fun resolveRecoveredCommands(snapshot: WakuSnapshot, acceptedPromptIds: Set<String>): WakuSnapshot {
+        val resolved = resolveObservedCommands(snapshot)
+        return resolved.copy(pendingCommands = resolved.pendingCommands.map { command ->
+            if (command.string("kind") == "prompt" && command.string("state") == "accepted" &&
+                command.string("requestId") in acceptedPromptIds) {
+                command.updated("state" to JsonPrimitive("unknown"),
+                    "error" to JsonPrimitive("同步后仍未找到这条消息，请核对会话记录；原文已保留"))
+            } else command
+        })
+    }
+
     fun validateReplayPage(page: JsonObject, runtimeId: String, sessionId: String, after: Long, through: Long?): Long {
         require(page.string("type") == "replayEvents") { "服务器返回了无效的事件页" }
         require(after >= 0) { "事件游标无效" }

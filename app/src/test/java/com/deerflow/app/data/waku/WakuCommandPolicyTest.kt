@@ -29,10 +29,10 @@ class WakuCommandPolicyTest {
         val pending = listOf(command("prepared", "prompt", "prepared"), command("sending", "prompt", "sending"), command("unknown", "prompt", "unknown"))
         assertEquals(listOf("prepared", "sending"), WakuCommandPolicy.acknowledge(pending).map { it["requestId"]!!.jsonPrimitive.content })
     }
-    @Test fun acknowledgingAnUnknownPromptKeepsAcceptedApprovalSuppression() {
-        val pending = listOf(command("unknown", "prompt", "unknown"), command("approval", "respond", "accepted", "tool-a"), command("stop", "cancel", "accepted"))
-        assertEquals(listOf("approval", "stop"), WakuCommandPolicy.acknowledge(pending).map { it["requestId"]!!.jsonPrimitive.content })
-        assertTrue(WakuCommandPolicy.acknowledge(listOf(command("prompt", "prompt", "accepted"))).isEmpty())
+    @Test fun acknowledgingAnUnknownPromptKeepsAcceptedCommandsUntilTheyAreObserved() {
+        val pending = listOf(command("unknown", "prompt", "unknown"), command("approval", "respond", "accepted", "tool-a"),
+            command("stop", "cancel", "accepted"), command("prompt", "prompt", "accepted"))
+        assertEquals(listOf("approval", "stop", "prompt"), WakuCommandPolicy.acknowledge(pending).map { it["requestId"]!!.jsonPrimitive.content })
     }
     private fun command(id: String, kind: String, state: String, target: String? = null) = buildJsonObject {
         put("requestId", id); put("kind", kind); put("state", state); put("targetRequestId", target?.let(::JsonPrimitive) ?: JsonNull)

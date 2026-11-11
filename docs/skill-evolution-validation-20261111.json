@@ -1,0 +1,63 @@
+{
+  "version_name": "2.4.0",
+  "version_code": 14,
+  "validated_on": "2026-11-11",
+  "backend_contract_commit": "3722ca94e939e5b67e28957e705caad07a51b05c",
+  "build": {
+    "command": "./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --offline",
+    "result": "BUILD SUCCESSFUL",
+    "gradle": "9.5.1",
+    "jdk": 25,
+    "unit_test_task": "UP-TO-DATE; reports correspond to unchanged sources",
+    "wrapper_sha256": "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7",
+    "wrapper_verified_against": "Gradle 9.5.1 distribution"
+  },
+  "android_unit_tests": {
+    "tests": 225,
+    "passed": 224,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1
+  },
+  "lint": {
+    "errors": 0,
+    "warnings": 25
+  },
+  "debug_apk": {
+    "sha256": "7dfe4fed3ebd69f3d870d9dd696a2ea459bb39f201a935273fa962166b28224d",
+    "matches_delivered_2_4_0": true
+  },
+  "prior_ui_validation": {
+    "date": "2026-11-10",
+    "device": "isolated Android API 37 emulator",
+    "server": "local synthetic Waku v12 fixture",
+    "passed": [
+      "install and launch",
+      "evolution list and pagination",
+      "validation and Diff display",
+      "Diff preserved after refresh",
+      "cancel candidate once and display cancelled",
+      "system Back returns to list",
+      "observation, withdrawal and historical groups",
+      "legacy server disables mutations",
+      "final APK install and launch"
+    ],
+    "request_audit": {
+      "approval_requests": 0,
+      "cancellation_requests": 1
+    }
+  },
+  "desktop_backend_validation": {
+    "date": "2026-11-11",
+    "build_id": "deerflow-lifecycle-3722ca94-20261111",
+    "checked_operations": [
+      "proposal.list",
+      "proposal.history",
+      "proposal.get"
+    ],
+    "matching_lifecycle_versions": true,
+    "automatic": true,
+    "review": false
+  },
+  "android_live_server_validation": false
+}

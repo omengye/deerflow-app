@@ -18,8 +18,7 @@ object WakuCommandPolicy {
         }
 
     fun acknowledge(commands: List<JsonObject>): List<JsonObject> = commands.filter {
-        it.value("state") in setOf("prepared", "sending") ||
-            (it.value("state") == "accepted" && it.value("kind") in setOf("respond", "respondUserInput", "cancel"))
+        it.value("state") in setOf("prepared", "sending", "accepted")
     }
 
     private fun JsonObject.value(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull

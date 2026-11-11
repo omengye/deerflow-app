@@ -52,7 +52,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val pendingPermissions = repo.pendingPermissions
     val pendingQuestions = repo.pendingQuestions
     val canSend = repo.canSend
-    val unknownSubmission = repo.unknownSubmission
+    val submissionStatus = repo.submissionStatus
     fun acknowledgeUnknown() = repo.acknowledgeUnknown()
 
     fun loadDraft(key: String) {

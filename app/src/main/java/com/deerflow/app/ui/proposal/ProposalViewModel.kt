@@ -12,10 +12,12 @@ class ProposalViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<ProposalState> = repository.state
 
     fun refresh() = repository.refresh()
+    fun refreshVisible() = repository.refreshVisible()
+    fun loadMore() = repository.loadMore()
+    fun refreshDetail() = repository.refreshDetail()
     fun select(proposalId: String) = repository.select(proposalId)
     fun clearSelection() = repository.clearSelection()
-    fun approve(proposalId: String, note: String? = null) = repository.approve(proposalId, note)
-    fun reject(proposalId: String, note: String? = null) = repository.reject(proposalId, note)
+    fun cancelCandidate(proposalId: String, note: String? = null) = repository.cancelCandidate(proposalId, note)
     fun clearMessage() = repository.clearMessage()
 }
 

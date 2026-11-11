@@ -17,10 +17,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -31,7 +29,6 @@ import com.deerflow.app.ui.proposal.ProposalScreen
 import com.deerflow.app.ui.proposal.ProposalViewModel
 import com.deerflow.app.ui.settings.SettingsScreen
 import com.deerflow.app.ui.theme.DeerflowTheme
-import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
@@ -62,7 +59,7 @@ class MainActivity : ComponentActivity() {
 private object ChatRoute
 
 @Serializable
-private object ApprovalsRoute
+private object EvolutionRoute
 
 @Serializable
 private object SettingsRoute
@@ -87,15 +84,6 @@ private fun AppRoot() {
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
             chatVm.setForeground(false)
-        }
-    }
-
-    LaunchedEffect(lifecycleOwner) {
-        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            while (true) {
-                proposalVm.refresh()
-                delay(PROPOSAL_REFRESH_INTERVAL_MS)
-            }
         }
     }
 
@@ -131,11 +119,11 @@ private fun AppRoot() {
             ChatScreen(
                 vm = chatVm,
                 proposalVm = proposalVm,
-                onOpenApprovals = { navController.navigate(ApprovalsRoute) },
+                onOpenEvolution = { navController.navigate(EvolutionRoute) },
                 onOpenSettings = { navController.navigate(SettingsRoute) },
             )
         }
-        composable<ApprovalsRoute> {
+        composable<EvolutionRoute> {
             ProposalScreen(
                 vm = proposalVm,
                 onBack = { navController.popBackStack() },
@@ -148,5 +136,3 @@ private fun AppRoot() {
         }
     }
 }
-
-private const val PROPOSAL_REFRESH_INTERVAL_MS = 30_000L

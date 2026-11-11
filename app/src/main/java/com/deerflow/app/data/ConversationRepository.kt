@@ -61,7 +61,7 @@ class ConversationRepository(
     private val _profileKey = MutableStateFlow("")
     private val _pendingPermissions = MutableStateFlow<List<JsonObject>>(emptyList())
     private val _pendingQuestions = MutableStateFlow<List<JsonObject>>(emptyList())
-    private val _unknownSubmission = MutableStateFlow<String?>(null)
+    private val _submissionStatus = MutableStateFlow(WakuSubmissionStatus())
     private val _taskFiles = MutableStateFlow(TaskFilesState())
     val taskFiles = _taskFiles.asStateFlow()
     val state = _state.asStateFlow()
@@ -73,7 +73,7 @@ class ConversationRepository(
     val profileKey = _profileKey.asStateFlow()
     val pendingPermissions = _pendingPermissions.asStateFlow()
     val pendingQuestions = _pendingQuestions.asStateFlow()
-    val unknownSubmission = _unknownSubmission.asStateFlow()
+    val submissionStatus = _submissionStatus.asStateFlow()
     val artifactHeaders: StateFlow<Map<String, String>> = MutableStateFlow(emptyMap())
 
     private class Profile(val key: String, var config: AppSettings, val store: WakuSessionStore) {
@@ -495,14 +495,16 @@ class ConversationRepository(
     }
 
     private suspend fun hydrateAttachOnce(link: Link, id: String, forceHydrate: Boolean) {
-        val shouldHydrate = mutex.withLock {
+        val (shouldHydrate, acceptedPromptIds) = mutex.withLock {
             ensureCurrent(link)
             link.artifactJobs[id]?.cancel()
             link.runtimes[id]?.catchingUp = true
             link.profile.syncErrors.remove(id)
             link.profile.syncStatus[id] = "正在校验会话…"
             link.profile.syncing += id; link.profile.ready -= id; publish(link.profile)
-            id in link.profile.remoteIds
+            (id in link.profile.remoteIds) to link.profile.snapshots[id]?.pendingCommands.orEmpty()
+                .filter { it.s("kind") == "prompt" && it.s("state") == "accepted" }
+                .mapNotNull { it.s("requestId") }.toSet()
         }
         try {
             if (!shouldHydrate) {
@@ -564,6 +566,12 @@ class ConversationRepository(
                 ensureCurrent(link)
                 require(!WakuRecovery.needsHistoryRefresh(link.profile.snapshots[id]?.session, link.profile.catalog[id])) {
                     "会话历史已更新，请重新同步"
+                }
+                val snapshot = link.profile.snapshots.getValue(id)
+                val recovered = WakuRecovery.resolveRecoveredCommands(snapshot, acceptedPromptIds)
+                if (recovered != snapshot) {
+                    putSnapshot(link.profile, id, recovered, false)
+                    flushLocal(link.profile)
                 }
                 link.profile.ready += id; link.profile.syncErrors.remove(id)
             }
@@ -1309,7 +1317,9 @@ class ConversationRepository(
             publish(p)
             return@withLock null
         }
-        val promptCmd = snapshot.pendingCommands.firstOrNull { it.s("kind") == "prompt" } ?: return@withLock null
+        val promptCmd = snapshot.pendingCommands.firstOrNull {
+            it.s("kind") == "prompt" && it.s("state") in setOf("unknown", "notSent", "rejected")
+        } ?: return@withLock null
         val text = promptCmd.s("text").orEmpty()
         val attachments = promptCmd.objs("attachments").mapNotNull { item ->
             val uriStr = item.s("uri")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -1487,8 +1497,11 @@ class ConversationRepository(
         )
         val snapshot = p.snapshots[p.selected]
         val readOnly = p.selected.startsWith("legacy:")
+        val submission = WakuSubmissionStatus.from(snapshot?.pendingCommands.orEmpty())
+        _submissionStatus.value = submission
         _state.value = if (readOnly) legacyStates.getOrPut(p.selected) { readLegacy(p.selected) } else snapshot?.let { WakuProjection.display(it) }
             ?: ConversationState(p.selected, status = "正在加载会话…")
+        submission.progress?.let { _state.value = _state.value.copy(status = it) }
         p.blocked[p.selected]?.let { _state.value = _state.value.copy(status = it) }
         snapshot?.pendingHistory?.let {
             _state.value = _state.value.copy(status = "会话历史操作尚未完成，请在桌面恢复后重新同步。")
@@ -1501,18 +1514,6 @@ class ConversationRepository(
         val actionsReady = p.selected in p.ready && p.selected !in p.syncing && snapshot?.interactionsVerified == true && snapshot.pendingHistory == null
         _pendingPermissions.value = if (actionsReady) snapshot?.permissions.orEmpty() else emptyList()
         _pendingQuestions.value = if (actionsReady) snapshot?.userInputs.orEmpty() else emptyList()
-        _unknownSubmission.value = snapshot?.pendingCommands?.filter { it.s("kind") == "prompt" || it.s("state") in setOf("unknown", "notSent", "rejected") }
-            ?.takeIf { it.isNotEmpty() }?.joinToString("\n\n") { command ->
-            val reason = command.s("error")?.takeIf { it.isNotBlank() }
-            val state = when (command.s("state")) {
-                "notSent" -> reason?.let { "消息未发送：$it" } ?: "消息未发送，原文已保留"
-                "rejected" -> reason?.let { "服务器拒绝了操作：$it" } ?: "服务器拒绝了操作，原文已保留"
-                "accepted" -> "服务器已接受，等待事件确认；没有自动重发"
-                "prepared", "sending" -> "正在提交；中断后请核对服务器状态"
-                else -> reason?.let { "操作结果未知（$it），请先核对服务器；没有自动重发" } ?: "操作结果未知，请先核对服务器；没有自动重发"
-            }
-            state + command.s("text")?.takeIf { it.isNotBlank() }?.let { "\n$it" }.orEmpty()
-        }
         _canSend.value = _isConnected.value && !readOnly && p.selected in p.ready && p.selected !in p.syncing &&
             p.selected !in p.blocked && snapshot != null && snapshot.pendingHistory == null && snapshot.session.s("status") !in BUSY && snapshot.pendingCommands.isEmpty()
         selection = Selection(p, p.selected)

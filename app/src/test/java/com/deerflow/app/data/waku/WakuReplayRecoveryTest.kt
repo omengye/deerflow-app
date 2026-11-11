@@ -154,6 +154,7 @@ class WakuReplayRecoveryTest {
     @Test fun controlRecoveryResumesSeparatelyAndDoesNotResurrectOldApprovals() = runTest {
         val store = WakuSessionStore(temporary.newFolder(), "wss://test.invalid/v1", "synthetic-token")
         var snapshot = f.snapshot(32).copy(interactionsVerified = false)
+        val originalMessages = snapshot.session.array("messages")
         store.save(snapshot)
         val seen = mutableListOf<Long>()
         val events: (Long) -> JsonObject = { n -> when (n) {
@@ -181,7 +182,7 @@ class WakuReplayRecoveryTest {
         assertEquals(listOf("current"), snapshot.interactionReplay!!.permissions.map { it.string("requestId") })
         assertEquals(listOf("question"), snapshot.interactionReplay!!.questions.map { it.string("requestId") })
         assertEquals(32L, snapshot.replayPosition()!!.sequence)
-        assertEquals(f.snapshot(32).session.array("messages"), snapshot.session.array("messages"))
+        assertEquals(originalMessages, snapshot.session.array("messages"))
     }
 
     @Test fun runtimeChangeDropsSavedControlsAndNativeWaitingSnapshotsRequireVerification() {

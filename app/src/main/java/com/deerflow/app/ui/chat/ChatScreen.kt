@@ -42,14 +42,11 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.automirrored.filled.Rule
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DrawerValue
@@ -94,15 +91,20 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.core.content.FileProvider
 import com.deerflow.app.R
 import com.deerflow.app.data.PendingAttachment
 import com.deerflow.app.data.proposal.SkillProposal
+import com.deerflow.app.data.proposal.isActive
 import com.deerflow.app.domain.ConversationState
 import com.deerflow.app.domain.model.ThreadMeta
 import com.deerflow.app.ui.proposal.ProposalCard
 import com.deerflow.app.ui.proposal.ProposalViewModel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
 
@@ -111,7 +113,7 @@ import java.util.Locale
 fun ChatScreen(
     vm: ChatViewModel,
     proposalVm: ProposalViewModel,
-    onOpenApprovals: () -> Unit,
+    onOpenEvolution: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
@@ -123,7 +125,7 @@ fun ChatScreen(
     val canSend by vm.canSend.collectAsStateWithLifecycle()
     val permissions by vm.pendingPermissions.collectAsStateWithLifecycle()
     val questions by vm.pendingQuestions.collectAsStateWithLifecycle()
-    val unknownSubmission by vm.unknownSubmission.collectAsStateWithLifecycle()
+    val submission by vm.submissionStatus.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
     val composer by vm.composer.collectAsStateWithLifecycle()
     var reviewReset by rememberSaveable { mutableStateOf(0) }
@@ -157,18 +159,24 @@ fun ChatScreen(
     val threadProposals = remember(proposalState.proposals, state.threadId) {
         proposalState.proposals
             .filter { it.trigger.threadId == state.threadId }
-            .filterNot { it.status in FINAL_PROPOSAL_STATUSES }
+            .filter { it.isActive }
             .sortedBy { it.createdAt }
             .take(MAX_THREAD_PROPOSAL_CARDS)
     }
 
-    LaunchedEffect(state.running) {
-        if (!state.running) proposalVm.refresh()
+    val proposalLifecycleOwner = LocalLifecycleOwner.current
+    val hasActiveProposals = threadProposals.isNotEmpty()
+    LaunchedEffect(proposalLifecycleOwner, hasActiveProposals) {
+        proposalLifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            do {
+                proposalVm.refresh()
+                if (hasActiveProposals) delay(30_000)
+            } while (hasActiveProposals)
+        }
     }
-    LaunchedEffect(proposalState.error, proposalState.notice) {
-        val message = proposalState.error ?: proposalState.notice ?: return@LaunchedEffect
-        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-        proposalVm.clearMessage()
+
+    LaunchedEffect(state.running, state.threadId) {
+        if (!state.running) proposalVm.refresh()
     }
 
     val filePicker = rememberLauncherForActivityResult(
@@ -337,10 +345,7 @@ fun ChatScreen(
                         IconButton(onClick = vm::refresh) {
                             Icon(Icons.Default.Refresh, contentDescription = "重新同步会话和产物")
                         }
-                        ProposalInboxButton(
-                            pendingCount = proposalState.pendingCount,
-                            onClick = onOpenApprovals,
-                        )
+                        TextButton(onClick = { proposalVm.clearSelection(); onOpenEvolution() }) { Text("技能") }
                         IconButton(onClick = onOpenSettings) {
                             Icon(Icons.Default.Settings, contentDescription = "Settings", tint = scheme.onBackground.copy(alpha = 0.7f))
                         }
@@ -353,8 +358,8 @@ fun ChatScreen(
                         .background(scheme.background)
                         .imePadding()
                 ) {
-                    val hasConnectionNotice = !connected || (connection.isNotBlank() && connection != "已连接" && unknownSubmission?.contains(connection) != true)
-                    if (hasConnectionNotice || unknownSubmission != null) {
+                    val hasConnectionNotice = !connected || (connection.isNotBlank() && connection != "已连接" && submission.issue?.contains(connection) != true)
+                    if (hasConnectionNotice || submission.issue != null) {
                         Column(Modifier.fillMaxWidth().background(scheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp)) {
                             if (hasConnectionNotice) {
                                 Text(connection, style = MaterialTheme.typography.bodySmall)
@@ -365,13 +370,22 @@ fun ChatScreen(
                                     }
                                 }
                             }
-                            unknownSubmission?.let { pending ->
-                                Text("这次操作的结果尚未确认。请先核对会话记录，避免重复执行。", style = MaterialTheme.typography.bodySmall)
+                            submission.issue?.let { pending ->
+                                Text(
+                                    if (submission.needsReview) "这次操作的结果尚未确认。请先核对会话记录，避免重复执行。"
+                                    else if (submission.canRestorePrompt) "消息未发送成功，原文已保留。"
+                                    else "操作未完成。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
                                 Text(pending, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                                 Row {
-                                    TextButton(onClick = { clipboard.setText(AnnotatedString(pending)) }) { Text("复制原文") }
-                                    TextButton(onClick = { vm.restorePendingToDraft(draftKey) }) { Text("恢复到输入框") }
-                                    TextButton(onClick = { vm.acknowledgeUnknown(); reviewReset++ }) { Text("解除锁定") }
+                                    if (submission.canRestorePrompt) {
+                                        TextButton(onClick = { clipboard.setText(AnnotatedString(pending)) }) { Text("复制原文") }
+                                        TextButton(enabled = submission.canResolve, onClick = { vm.restorePendingToDraft(draftKey) }) { Text("恢复到输入框") }
+                                    }
+                                    TextButton(enabled = submission.canResolve, onClick = { vm.acknowledgeUnknown(); reviewReset++ }) {
+                                        Text(if (submission.needsReview) "已核对" else "关闭")
+                                    }
                                 }
                             }
                         }
@@ -439,13 +453,10 @@ fun ChatScreen(
                 artifactHeaders = artifactHeaders,
                 resolveMessageFile = { vm.resolveMessageFile(it, state.threadId) },
                 proposals = threadProposals,
-                actionProposalId = proposalState.actionProposalId,
                 onViewProposal = { proposalId ->
                     proposalVm.select(proposalId)
-                    onOpenApprovals()
+                    onOpenEvolution()
                 },
-                onApproveProposal = proposalVm::approve,
-                onRejectProposal = proposalVm::reject,
                 modifier = Modifier.padding(padding),
             )
         }
@@ -504,10 +515,7 @@ private fun Transcript(
     artifactHeaders: Map<String, String>,
     resolveMessageFile: suspend (com.deerflow.app.domain.model.MessageFile) -> com.deerflow.app.domain.model.AgentArtifact,
     proposals: List<SkillProposal>,
-    actionProposalId: String?,
     onViewProposal: (String) -> Unit,
-    onApproveProposal: (String, String?) -> Unit,
-    onRejectProposal: (String, String?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var previousItemCount by itemCount
@@ -597,44 +605,15 @@ private fun Transcript(
                 }
                 is TranscriptItem.ProposalItem -> ProposalCard(
                     proposal = item.proposal,
-                    busy = actionProposalId == item.proposal.id,
                     compact = true,
                     onView = { onViewProposal(item.proposal.id) },
-                    onApprove = { onApproveProposal(item.proposal.id, null) },
-                    onReject = { onRejectProposal(item.proposal.id, null) },
                 )
             }
         }
     }
 }
 
-@Composable
-private fun ProposalInboxButton(pendingCount: Int, onClick: () -> Unit) {
-    IconButton(onClick = onClick) {
-        BadgedBox(
-            badge = {
-                if (pendingCount > 0) {
-                    Badge { Text(if (pendingCount > 99) "99+" else pendingCount.toString()) }
-                }
-            },
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.Rule,
-                contentDescription = "Proposal 审批",
-                tint = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.75f),
-            )
-        }
-    }
-}
-
 private const val MAX_THREAD_PROPOSAL_CARDS = 3
-
-private val FINAL_PROPOSAL_STATUSES = setOf(
-    "published",
-    "rejected",
-    "failed",
-    "stale",
-)
 
 private val STREAMING_KINDS = setOf(
     com.deerflow.app.domain.BlockKind.ASSISTANT,

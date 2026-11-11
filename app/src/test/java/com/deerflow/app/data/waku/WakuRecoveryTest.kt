@@ -86,6 +86,34 @@ class WakuRecoveryTest {
         assertTrue(WakuRecovery.resolveObservedCommands(withEcho).pendingCommands.isEmpty())
     }
 
+    @Test fun `recovery resolves observed acknowledgements and exposes only old unobserved prompts`() {
+        fun pending(request: String, state: String = "accepted", kind: String = "prompt") = buildJsonObject {
+            put("requestId", request); put("messageId", request); put("kind", kind); put("state", state)
+        }
+        val commands = listOf(pending("observed"), pending("missing"), pending("new"), pending("sending", "sending"),
+            pending("approval", kind = "respond"))
+        val snapshot = WakuProjection.fromSession(session(1).updated("messages" to JsonArray(listOf(
+            buildJsonObject { put("id", "observed") },
+        )))).copy(pendingCommands = commands)
+        val resolved = WakuRecovery.resolveRecoveredCommands(snapshot, setOf("observed", "missing"))
+        assertEquals(listOf("missing", "new", "sending", "approval"), resolved.pendingCommands.map { it.string("requestId") })
+        assertEquals(listOf("unknown", "accepted", "sending", "accepted"), resolved.pendingCommands.map { it.string("state") })
+        assertNotNull(resolved.pendingCommands.first().string("error"))
+        assertTrue(WakuSubmissionStatus.from(resolved.pendingCommands).needsReview)
+    }
+
+    @Test fun `recovered message echo clears an acknowledgement without any manual review`() {
+        val pending = buildJsonObject {
+            put("requestId", "request"); put("messageId", "message"); put("kind", "prompt"); put("state", "accepted")
+        }
+        val snapshot = WakuProjection.fromSession(session(1).updated("messages" to JsonArray(listOf(
+            buildJsonObject { put("id", "message") },
+        )))).copy(pendingCommands = listOf(pending))
+        val resolved = WakuRecovery.resolveRecoveredCommands(snapshot, setOf("request"))
+        assertTrue(resolved.pendingCommands.isEmpty())
+        assertEquals(WakuSubmissionStatus(), WakuSubmissionStatus.from(resolved.pendingCommands))
+    }
+
     @Test fun `jitter is bounded and retry never spins`() {
         assertEquals(500L, WakuRecovery.retryDelayMillis(0, 0.0))
         assertEquals(1000L, WakuRecovery.retryDelayMillis(0, 1.0))

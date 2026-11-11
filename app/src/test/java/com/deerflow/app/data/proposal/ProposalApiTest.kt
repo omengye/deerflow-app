@@ -1,53 +1,70 @@
 package com.deerflow.app.data.proposal
 
-import com.deerflow.app.data.waku.WakuJson
 import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.*
 import org.junit.Test
 
-class ProposalApiTest {
-    private fun proposal(script: Boolean = false) = SkillProposal(
-        id = "p-1", status = "pending_review", action = "create", skillName = "example", stateVersion = 7,
-        scriptReviewRequired = script,
-    )
+internal fun candidate(id: String = "p-1", version: Long = 7, status: String = "validating", lifecycle: String = "evaluating") = SkillProposal(
+    id = id, status = status, action = "create", skillName = "example", stateVersion = version, origin = "automatic",
+    lifecycle = CandidateLifecycle(stateVersion = version, status = lifecycle, canCancel = status in setOf("validating", "pending_review")),
+)
 
-    @Test fun `review binds exact state and preserves explicit null base for new skill`() {
-        val request = proposalReviewCommand(proposal(), "approve", " reviewed ")
-        assertEquals("proposal.approve", request["operation"]!!.jsonPrimitive.content)
+class ProposalApiTest {
+    @Test fun `cancellation binds displayed version without any approval or script override`() {
+        val request = proposalCancellationCommand(candidate().copy(scriptReviewRequired = true), " cancelled ")
+        assertEquals("proposal.reject", request["operation"]!!.jsonPrimitive.content)
         assertEquals("7", request["expected_state_version"]!!.jsonPrimitive.content)
         assertEquals(JsonNull, request["expected_base_sha256"])
-        assertEquals("reviewed", request["note"]!!.jsonPrimitive.content)
+        assertEquals("cancelled", request["note"]!!.jsonPrimitive.content)
         assertFalse(request.containsKey("acknowledge_unverified_scripts"))
     }
 
-    @Test fun `script acknowledgment is tied to approval of the displayed candidate`() {
-        assertEquals(JsonPrimitive(true), proposalReviewCommand(proposal(true), "approve", null)["acknowledge_unverified_scripts"])
-        assertFalse(proposalReviewCommand(proposal(true), "reject", null).containsKey("acknowledge_unverified_scripts"))
+    @Test fun `legacy and mismatched lifecycle cannot authorize cancellation`() {
+        val rows = listOf(candidate().copy(lifecycle = null), candidate().copy(stateVersion = 8),
+            candidate(lifecycle = "historical"), candidate(status = "published", lifecycle = "observing"))
+        rows.forEach {
+            assertFalse(it.canCancel)
+            assertThrows(IllegalArgumentException::class.java) { proposalCancellationCommand(it, null) }
+        }
     }
 
-    @Test(expected = IllegalArgumentException::class)
-    fun `missing state version cannot be submitted`() {
-        proposalReviewCommand(proposal().copy(stateVersion = 0), "approve", null)
-    }
-
-    @Test fun `management projection tolerates additional fields and retains review version`() {
-        val decoded = WakuJson.decodeFromString(SkillProposal.serializer(), """
-            {"id":"p-1","status":"pending_review","action":"create","skill_name":"example",
-            "state_version":7,"base_sha256":null,"script_review_required":true,"new_field":{},
-            "approval":{"review":{"ExpectedStateVersion":6}},"publication":{"state":"approved_pending"}}
+    @Test fun `wire projection retains observation and actual validation results`() {
+        val row = ProposalJson.decodeFromString<SkillProposal>("""
+            {"id":"p-1","status":"published","action":"create","skill_name":"example","state_version":7,
+             "evaluation":{"security":"passed","behavior":"not_run","isolated_scripts":false},
+             "lifecycle":{"state_version":7,"status":"withdrawn","reason":"rolled_back","can_cancel":false,
+               "observation":{"status":"rolled_back","successes":1,"failures":2,"rollback_revision":4}},
+             "new_field":{},"file_publication_pending":false}
         """.trimIndent())
-        assertEquals(7L, decoded.stateVersion)
-        assertTrue(decoded.scriptReviewRequired)
-        assertNotNull(decoded.approval)
-        assertTrue(publicationNotice(decoded).contains("尚未完成"))
-        assertFalse(publicationNotice(decoded).contains("已批准并发布"))
+        assertEquals(EvolutionGroup.WITHDRAWN, row.evolutionGroup)
+        assertEquals("已撤回", row.statusLabel)
+        assertEquals(2, row.currentLifecycle!!.observation!!.failures)
+        assertEquals("not_run", row.evaluation.behavior)
+        assertFalse(row.evaluation.isolatedScripts)
+        assertFalse(row.canCancel)
     }
 
-    @Test fun `publication success requires published authoritative state`() {
-        assertEquals("提案已批准并发布", publicationNotice(proposal().copy(publication = JsonObject(mapOf("state" to JsonPrimitive("published"))))))
-        assertTrue(publicationNotice(proposal().copy(publication = JsonObject(mapOf("state" to JsonPrimitive("blocked"))))).contains("被阻止"))
+    @Test fun `storage publication never implies stable adoption`() {
+        val row = candidate(status = "published", lifecycle = "observing")
+        assertEquals(EvolutionGroup.OBSERVING, row.evolutionGroup)
+        assertEquals("已采用 · 观察中", row.statusLabel)
+        assertEquals("已发布 · 状态待同步", row.copy(lifecycle = null).statusLabel)
+        assertFalse(row.copy(lifecycle = null).isActive)
+    }
+
+    @Test fun `historical pending rows and failed candidates are not active approvals`() {
+        val old = candidate(status = "pending_review", lifecycle = "historical")
+        assertEquals(EvolutionGroup.HISTORY, old.evolutionGroup)
+        assertFalse(old.isActive)
+        assertFalse(old.canCancel)
+        assertEquals("验证未通过", candidate(status = "failed", lifecycle = "rejected").statusLabel)
+        assertEquals("已取消", candidate(status = "rejected", lifecycle = "rejected").copy(reviewedBy = "desktop").statusLabel)
+    }
+
+    @Test fun `pagination cursor is retained instead of draining every page`() {
+        val page = ProposalJson.decodeFromString<ProposalListResponse>("""{"proposals":[],"next_cursor":"page2","catalog_version":2147483648}""")
+        assertEquals("page2", page.nextCursor)
+        assertEquals(2147483648L, page.catalogVersion)
     }
 }
