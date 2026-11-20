@@ -131,6 +131,7 @@ fun ChatScreen(
     var reviewReset by rememberSaveable { mutableStateOf(0) }
     val connected by vm.isConnected.collectAsStateWithLifecycle()
     val profileKey by vm.profileKey.collectAsStateWithLifecycle()
+    val secureCredentialTransport by vm.secureCredentialTransport.collectAsStateWithLifecycle()
     val scheme = MaterialTheme.colorScheme
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
@@ -392,6 +393,7 @@ fun ChatScreen(
                     }
                     PendingActions(
                         permissions = permissions, requests = questions, enabled = connected, resetKey = reviewReset,
+                        secureCredentialTransport = secureCredentialTransport, onCredential = vm::respondCredential,
                         onPermission = vm::respondPermission, onAnswers = vm::respondUserInput,
                     )
                     StatusBar(state)

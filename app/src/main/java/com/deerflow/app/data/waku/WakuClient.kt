@@ -394,6 +394,7 @@ class WakuClient(
 
     companion object {
         private val defaultSocketFactory: WebSocket.Factory = OkHttpClient.Builder()
+            .followRedirects(false) // Authenticate the configured host before trusting its enrollment key.
             .connectTimeout(25, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
             .pingInterval(20, TimeUnit.SECONDS)

@@ -19,6 +19,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import com.deerflow.app.data.waku.ServiceCredentialForm
 import androidx.compose.runtime.key
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -35,6 +37,7 @@ import kotlinx.serialization.json.put
 @Composable
 internal fun PendingActions(
     permissions: List<JsonObject>, requests: List<JsonObject>, enabled: Boolean, resetKey: Int,
+    secureCredentialTransport: Boolean, onCredential: (String, JsonObject) -> Unit,
     onPermission: (String, String) -> Unit, onAnswers: (String, JsonArray) -> Unit,
 ) {
     if (permissions.isEmpty() && requests.isEmpty()) return
@@ -43,21 +46,44 @@ internal fun PendingActions(
         permissions.forEach { request ->
             key(request.text("requestId")) {
                 val id = request.text("requestId")
-            var submitted by rememberSaveable(id, resetKey) { mutableStateOf(false) }
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(request.text("title").ifBlank { "操作需要确认" }, style = MaterialTheme.typography.titleSmall)
-                    Text(request.text("detail"), style = MaterialTheme.typography.bodySmall)
-                    if (submitted) Text("已提交，正在同步处理结果…", style = MaterialTheme.typography.bodySmall)
-                    (request["options"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.forEach { option ->
-                        TextButton(enabled = enabled && !submitted && id.isNotBlank() && option.text("id").isNotBlank(), onClick = {
-                            submitted = true
-                            onPermission(id, option.text("id"))
-                        }) { Text(option.text("label").ifBlank { option.text("id") }) }
+                val options = (request["options"] as? JsonArray).orEmpty().filterIsInstance<JsonObject>()
+                val allow = options.singleOrNull { it.text("id") == "allow_once" }
+                val requiresForm = allow?.containsKey("credentialForm") == true
+                val form = allow?.let(ServiceCredentialForm::fromOption)
+                var submitted by rememberSaveable(id, form?.publicKey, resetKey) { mutableStateOf(false) }
+                var editing by remember(id, form?.publicKey, enabled, secureCredentialTransport) { mutableStateOf(false) }
+                Card(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(request.text("title").ifBlank { "操作需要确认" }, style = MaterialTheme.typography.titleSmall)
+                        Text(request.text("detail"), style = MaterialTheme.typography.bodySmall)
+                        if (requiresForm && form == null) Text("此凭据表单需要更新客户端。")
+                        else if (requiresForm && !secureCredentialTransport) Text("手机录入凭据需要 WSS 安全连接或本机回环连接，请检查连接设置。")
+                        if (submitted) Text("已提交，正在同步处理结果…", style = MaterialTheme.typography.bodySmall)
+                        options.forEach { option ->
+                            val optionId = option.text("id")
+                            val enter = optionId == "allow_once" && requiresForm
+                            TextButton(enabled = enabled && !submitted && id.isNotBlank() && optionId.isNotBlank() &&
+                                (!enter || form != null && secureCredentialTransport), onClick = {
+                                if (enter) editing = true else {
+                                    submitted = true
+                                    onPermission(id, optionId)
+                                }
+                            }) { Text(if (enter) "填写服务凭据" else option.text("label").ifBlank { optionId }) }
+                        }
                     }
                 }
+                if (editing && form != null && enabled && !submitted && secureCredentialTransport) {
+                    CredentialEnrollmentDialog(form, onBackground = { editing = false }, onCancel = {
+                        editing = false
+                        submitted = true
+                        onPermission(id, "reject_once")
+                    }, onSealed = { sealed ->
+                        editing = false
+                        submitted = true
+                        onCredential(id, sealed)
+                    })
+                }
             }
-        }
         }
         requests.forEach { request -> key(request.text("requestId")) { QuestionCard(request, enabled, resetKey, onAnswers) } }
     }

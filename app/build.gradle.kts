@@ -22,8 +22,8 @@ android {
         applicationId = "com.deerflow.app"
         minSdk = 30
         targetSdk = 36
-        versionCode = 14
-        versionName = "2.4.0"
+        versionCode = 17
+        versionName = "2.5.1"
         testInstrumentationRunner = "com.deerflow.app.OssSmokeInstrumentation"
     }
 

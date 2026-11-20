@@ -49,6 +49,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     val connection = repo.connection
     val isConnected = repo.isConnected
     val profileKey = repo.profileKey
+    val secureCredentialTransport = repo.secureCredentialTransport
     val pendingPermissions = repo.pendingPermissions
     val pendingQuestions = repo.pendingQuestions
     val canSend = repo.canSend
@@ -206,6 +207,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun refresh() = repo.refresh()
     fun setForeground(value: Boolean) { if (!value) flushDrafts(); repo.setForeground(value) }
+    fun respondCredential(requestId: String, sealed: kotlinx.serialization.json.JsonObject) = repo.respondCredential(requestId, sealed)
     fun respondPermission(requestId: String, optionId: String) = repo.respondPermission(requestId, optionId)
     fun respondUserInput(requestId: String, answers: JsonArray) = repo.respondUserInput(requestId, answers)
 }

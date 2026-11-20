@@ -29,6 +29,12 @@ class OssSmokeInstrumentation : Instrumentation() {
     override fun onStart() {
         val result = Bundle()
         try {
+            if (arguments?.getString("credential_forms") == "true") {
+                runCredentialFormsSmoke(this)
+                result.putString("credential_forms", "key_only_and_username_key_passed")
+                finish(Activity.RESULT_OK, result)
+                return
+            }
             runBlocking {
                 val store = SettingsStore(targetContext)
                 val profileFile = File(targetContext.filesDir, "oss-validation-profile.json")

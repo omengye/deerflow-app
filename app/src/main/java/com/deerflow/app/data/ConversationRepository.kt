@@ -71,6 +71,8 @@ class ConversationRepository(
     val isConnected = _isConnected.asStateFlow()
     val canSend = _canSend.asStateFlow()
     val profileKey = _profileKey.asStateFlow()
+    private val _secureCredentialTransport = MutableStateFlow(false)
+    val secureCredentialTransport = _secureCredentialTransport.asStateFlow()
     val pendingPermissions = _pendingPermissions.asStateFlow()
     val pendingQuestions = _pendingQuestions.asStateFlow()
     val submissionStatus = _submissionStatus.asStateFlow()
@@ -207,6 +209,7 @@ class ConversationRepository(
         }
         next.config = cfg
         profile = next
+        _secureCredentialTransport.value = credentialTransportAllowed(cfg.endpoint)
         _profileKey.value = key
         _isConnected.value = false
         if (next.selected !in next.snapshots) createDraft(next, next.selected)
@@ -713,7 +716,9 @@ class ConversationRepository(
                     ensureCurrent(link)
                     val p = link.profile
                     val current = p.snapshots.getValue(id)
-                    val accepted = current.pendingCommands.filter { it.s("state") == "accepted" }.mapNotNull { it.s("targetRequestId") }.toSet()
+                    val accepted = current.pendingCommands.filter {
+                        it.s("state") == "accepted" && it["awaitsPermissionResolved"] != JsonPrimitive(true)
+                    }.mapNotNull { it.s("targetRequestId") }.toSet()
                     putSnapshot(p, id, current.copy(interactionReplay = checkpoint,
                         taskReady = newestReady(current.taskReady, checkpoint.taskReady),
                         permissions = if (page.hasMore) current.permissions else checkpoint.permissions.filterNot { it.s("requestId") in accepted },
@@ -1176,9 +1181,10 @@ class ConversationRepository(
 
     fun cancel() = control("cancel")
     fun respondPermission(requestId: String, optionId: String) = control("respond", requestId) { put("requestId", requestId); put("optionId", optionId) }
+    fun respondCredential(requestId: String, sealed: JsonObject) = control("respond", requestId, sealed)
     fun respondUserInput(requestId: String, answers: JsonArray) = control("respondUserInput", requestId) { put("requestId", requestId); put("answers", answers) }
 
-    private fun control(kind: String, target: String? = null, command: JsonObjectBuilder.() -> Unit = {}): Job {
+    private fun control(kind: String, target: String? = null, sealed: JsonObject? = null, command: JsonObjectBuilder.() -> Unit = {}): Job {
         val captured = selection
         val p = captured?.profile
         val id = captured?.id ?: _state.value.threadId
@@ -1190,6 +1196,7 @@ class ConversationRepository(
                 val sequence = mutex.withLock { p.snapshots[id]?.cursor?.n("sequence") ?: 0 }
                 recordPending(p, id, buildJsonObject {
                     put("kind", kind); put("requestId", requestId); put("targetRequestId", primitive(target)); put("state", "prepared"); put("afterSequence", sequence)
+                    if (sealed != null) put("awaitsPermissionResolved", true)
                 })
                 operations.withLock {
                     val link = active?.takeIf { it.profile === p && profile === p } ?: error("连接已改变，操作尚未发送")
@@ -1198,14 +1205,28 @@ class ConversationRepository(
                         require(_isConnected.value && id in p.ready && id !in p.syncing) { "连接尚未同步，操作未发送" }
                         require(p.snapshots[id]?.pendingHistory == null) { "会话历史操作尚未完成，请在桌面恢复后重新同步；操作未发送" }
                         require(WakuCommandPolicy.canSubmitControl(p.snapshots[id]?.pendingCommands.orEmpty(), requestId, kind, target)) { "此操作已提交，请先核对结果" }
+                        if (sealed != null) {
+                            require(p.selected == id && credentialTransportAllowed(p.config.endpoint)) { "请通过安全连接重新打开凭据授权" }
+                            val snapshot = p.snapshots[id]
+                            val card = snapshot?.permissions?.singleOrNull { it.s("requestId") == target }
+                            val options = card?.get("options") as? JsonArray
+                            val currentKey = options.orEmpty().filterIsInstance<JsonObject>()
+                                .mapNotNull(ServiceCredentialForm::fromOption).singleOrNull()?.publicKey
+                            require(snapshot?.interactionsVerified == true && currentKey != null && currentKey == sealed.s("publicKey")) { "凭据授权已变更，请重新确认" }
+                        }
                         link.runtimes[id]?.id ?: error("会话没有可连接的运行时")
                     }
                     updatePending(p, id, requestId, "sending")
                     dispatched = true
-                    link.client.request(wakuCommand(kind, command), id, runtime, requestId)
+                    val wire = if (sealed == null) wakuCommand(kind, command) else wakuCommand("respondCredential") {
+                        put("requestId", target); put("sealed", sealed)
+                    }
+                    link.client.request(wire, id, runtime, requestId)
                     updatePending(p, id, requestId, "accepted")
                     mutex.withLock {
-                        if (active === link && target != null) {
+                        // For enrollment the ACK only confirms delivery. All clients retire
+                        // this card on the same server permissionResolved event or turn end.
+                        if (active === link && target != null && sealed == null) {
                             val old = p.snapshots.getValue(id)
                             putSnapshot(p, id, old.copy(
                                 permissions = if (kind == "respond") old.permissions.filterNot { it.s("requestId") == target } else old.permissions,
@@ -1220,9 +1241,11 @@ class ConversationRepository(
                 throw cancelled
             } catch (error: Exception) {
                 val state = if (!dispatched || error is WakuRequestException && error.delivery == WakuDelivery.NOT_SENT) "notSent"
-                    else if (error is WakuRequestException && error.delivery == WakuDelivery.REJECTED) "rejected" else "unknown"
-                runCatching { updatePending(p, id, requestId, state, errorMessage = error.message) }
-                showError(p, error.message ?: "操作失败，请核对")
+                    else if (error is WakuRequestException && error.delivery == WakuDelivery.REJECTED &&
+                    (sealed == null || error.message?.contains("delivery status unknown", ignoreCase = true) != true)) "rejected" else "unknown"
+                val detail = if (sealed == null) error.message else if (state == "unknown") "凭据提交结果待同步，请核对后继续" else "凭据未提交，请检查安全连接和当前授权"
+                runCatching { updatePending(p, id, requestId, state, errorMessage = detail) }
+                showError(p, detail ?: "操作失败，请核对")
             }
         }
     }

@@ -83,6 +83,7 @@ object WakuProjection {
         val mutable = MutableProjection(snapshot.session, nowMillis, "$sessionId/$runtimeId/$epoch/$sequence")
         var permissions = if (epochChanged) emptyList() else snapshot.permissions
         var userInputs = if (epochChanged) emptyList() else snapshot.userInputs
+        var commands = snapshot.pendingCommands
         if (epochChanged) mutable.finishStreams()
         when (kind) {
             "conversationCapability" -> mutable.values["conversation_capability"] = JsonPrimitive(data?.flag("supported") == true)
@@ -123,8 +124,14 @@ object WakuProjection {
                 userInputs = userInputs.filterNot { it.text("requestId") == data.text("requestId") } + data
                 mutable.status = "waiting"
             }
-            // Reserved for a future server capability; v12 still resolves at the turn boundary.
-            "permissionResolved" -> permissions = permissions.filterNot { it.text("requestId") == data?.text("requestId") }
+            "permissionResolved" -> data?.text("requestId")?.let { request ->
+                val hadCard = permissions.any { it.text("requestId") == request }
+                permissions = permissions.filterNot { it.text("requestId") == request }
+                commands = commands.filterNot { it.text("kind") == "respond" && it.text("targetRequestId") == request }
+                if (hadCard && permissions.isEmpty() && userInputs.isEmpty() && mutable.status == "waiting") {
+                    mutable.status = "working"
+                }
+            }
             "userInputResolved" -> userInputs = userInputs.filterNot { it.text("requestId") == data?.text("requestId") }
             "turnParked" -> { mutable.finishStreams(); mutable.status = "background" }
             "turnFinished" -> {
@@ -142,7 +149,7 @@ object WakuProjection {
             "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
         mutable.values["runtime_event_cursor"] = obj("runtime_id" to JsonPrimitive(runtimeId), "epoch" to JsonPrimitive(epoch), "sequence" to JsonPrimitive(sequence))
         val projected = if (kind == "promptSubmitted") WakuMessageFiles.materialize(snapshot.copy(session = mutable.build())).session else mutable.build()
-        return snapshot.copy(session = WakuSessionTitles.withFallback(projected), permissions = permissions, userInputs = userInputs, cursor = cursor,
+        return snapshot.copy(session = WakuSessionTitles.withFallback(projected), permissions = permissions, userInputs = userInputs, cursor = cursor, pendingCommands = commands,
             runtimeId = runtimeId, retiredEpochs = if (epochChanged) (snapshot.retiredEpochs + listOfNotNull(previous?.text("epoch"))).distinct() else snapshot.retiredEpochs,
             interactionsVerified = (snapshot.interactionsVerified && !epochChanged) || kind in setOf("promptSubmitted", "turnStarted", "turnFinished", "processExited"),
             interactionReplay = if (epochChanged) null else snapshot.interactionReplay,

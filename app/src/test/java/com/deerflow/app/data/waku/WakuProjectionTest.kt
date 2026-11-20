@@ -82,6 +82,22 @@ class WakuProjectionTest {
         assertEquals(off, reduce(off, 1, "toolApprovalChanged", JsonPrimitive("ask")))
     }
 
+    @Test fun replayResolvesOnlyTheMatchingCredentialApproval() {
+        val first = reduce(initial, 1, "permission", buildJsonObject { put("requestId", "one") })
+        val second = reduce(first, 2, "permission", buildJsonObject { put("requestId", "two") })
+        fun pending(id: String) = buildJsonObject { put("kind","respond"); put("targetRequestId",id); put("state","unknown") }
+        val before = second.copy(pendingCommands = listOf(pending("one"), pending("two")))
+        val receipt = buildJsonObject { put("requestId","one") }
+        val resolved = reduce(before, 3, "permissionResolved", receipt)
+        assertEquals(listOf("two"), resolved.permissions.map { it["requestId"]!!.jsonPrimitive.content })
+        assertEquals(listOf(pending("two")), resolved.pendingCommands)
+        assertEquals("waiting", resolved.session["status"]!!.jsonPrimitive.content)
+        assertEquals(resolved, reduce(resolved, 3, "permissionResolved", receipt))
+        val done = reduce(resolved, 4, "permissionResolved", buildJsonObject { put("requestId","two") })
+        assertTrue(done.permissions.isEmpty()); assertTrue(done.pendingCommands.isEmpty())
+        assertEquals("working", done.session["status"]!!.jsonPrimitive.content)
+    }
+
     @Test fun replayDoesNotDuplicateIdenticalTextButDistinctEventsDo() {
         var state = reduce(initial, 1, "promptSubmitted", prompt("turn", "message", "hello"))
         state = reduce(state, 2, "turnStarted")
