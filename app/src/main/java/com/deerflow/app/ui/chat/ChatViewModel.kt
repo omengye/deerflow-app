@@ -46,6 +46,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     fun refreshArtifacts() = repo.refreshArtifacts()
     suspend fun resolveArtifact(file: com.deerflow.app.domain.model.AgentArtifact, threadId: String) = repo.resolveArtifact(file, threadId)
     suspend fun resolveMessageFile(file: com.deerflow.app.domain.model.MessageFile, threadId: String) = repo.resolveMessageFile(file, threadId)
+    suspend fun resolveGeneratedImage(reference: String, messageId: String?, threadId: String, profileKey: String) =
+        repo.resolveGeneratedImage(reference, messageId, threadId, profileKey)
     val connection = repo.connection
     val isConnected = repo.isConnected
     val profileKey = repo.profileKey

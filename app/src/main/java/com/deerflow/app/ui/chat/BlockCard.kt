@@ -70,6 +70,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -99,6 +101,7 @@ import coil.request.ImageRequest
 import com.deerflow.app.domain.UserDisplayText
 import com.deerflow.app.domain.model.AgentArtifact
 import com.deerflow.app.domain.model.MessageFile
+import com.deerflow.app.data.waku.WakuImageReference
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -115,6 +118,8 @@ fun BlockCard(
     artifactHeaders: Map<String, String> = emptyMap(),
     isStreaming: Boolean = false,
     resolveMessageFile: (suspend (MessageFile) -> AgentArtifact)? = null,
+    resolveGeneratedImage: (suspend (String) -> AgentArtifact)? = null,
+    imageReloadKey: Any? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
 
@@ -179,6 +184,8 @@ fun BlockCard(
                                 text = block.content,
                                 textColor = scheme.onSecondary,
                                 artifactHeaders = artifactHeaders,
+                                resolveGeneratedImage = resolveGeneratedImage,
+                                imageReloadKey = imageReloadKey,
                             )
                             if (isStreaming && block.content.isNotEmpty()) {
                                 TypingCursor(
@@ -386,10 +393,13 @@ internal fun ArtifactCard(
     headers: Map<String, String> = emptyMap(),
     autoPreview: Boolean = false,
     resolve: (suspend () -> AgentArtifact)? = null,
+    reloadKey: Any? = null,
+    previewContentScale: ContentScale = ContentScale.Crop,
 ) {
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val currentResolve by rememberUpdatedState(resolve)
     var resolved by remember(artifact.path, artifact.name, artifact.mimeType, artifact.size) { mutableStateOf<AgentArtifact?>(null) }
     var previewOpen by remember(artifact.path) { mutableStateOf(false) }
     var busy by remember(artifact.path) { mutableStateOf<String?>(null) }
@@ -400,7 +410,7 @@ internal fun ArtifactCard(
         resolved?.takeIf { cached ->
             cached.url.isNotBlank() && (Uri.parse(cached.url).scheme != "file" || runCatching { checkedCacheFile(context, Uri.parse(cached.url)) }.isSuccess)
         }?.let { return it }
-        return (resolve?.invoke() ?: artifact).also { resolved = it }
+        return (currentResolve?.invoke() ?: artifact).also { resolved = it }
     }
     fun action(kind: String) {
         if (busy != null) return
@@ -437,11 +447,13 @@ internal fun ArtifactCard(
             finally { busy = null }
         }
     }
-    LaunchedEffect(artifact.path, artifact.url, autoPreview) {
+    LaunchedEffect(artifact.path, artifact.url, autoPreview, reloadKey) {
         if (autoPreview && isImage) {
+            busy = "图片加载中…"; failure = null
             try { content() }
             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (_: Exception) { failure = "图片暂未加载，点击重试" }
+            catch (error: Exception) { failure = "图片暂未加载，点击重试。" + error.message.orEmpty() }
+            finally { busy = null }
         }
     }
     val shown = resolved ?: artifact
@@ -456,8 +468,18 @@ internal fun ArtifactCard(
         Column(Modifier.padding(10.dp)) {
             if (isImage && resolved != null) {
                 NetworkImage(model = authenticatedImageRequest(context, shown.url, headers),
-                    contentDescription = shown.name, contentScale = ContentScale.Crop,
+                    contentDescription = shown.name, contentScale = previewContentScale,
                     modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(scheme.surfaceVariant))
+                Spacer(Modifier.height(8.dp))
+            } else if (isImage && autoPreview) {
+                Box(Modifier.fillMaxWidth().height(180.dp).background(scheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                    if (busy != null) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CircularProgressIndicator(Modifier.size(24.dp))
+                            Text("正在加载图片…", style = MaterialTheme.typography.bodySmall)
+                        }
+                    } else ImageLoadState("图片加载失败，点击重试")
+                }
                 Spacer(Modifier.height(8.dp))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -467,7 +489,7 @@ internal fun ArtifactCard(
                 Column(Modifier.weight(1f)) {
                     Text(artifact.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
                         maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(busy ?: listOfNotNull(artifact.mimeType, artifact.size?.let { formatFileSize(it) }).joinToString(" · "),
+                    Text(busy ?: listOfNotNull(shown.mimeType, shown.size?.let { formatFileSize(it) }).joinToString(" · "),
                         style = MaterialTheme.typography.labelSmall)
                 }
                 androidx.compose.material3.IconButton(onClick = { action("分享中…") }, enabled = busy == null) {
@@ -487,11 +509,21 @@ internal fun ArtifactCard(
     if (previewOpen && isImage && resolved != null) {
         AlertDialog(onDismissRequest = { previewOpen = false },
             confirmButton = { TextButton(onClick = { previewOpen = false }) { Text("关闭") } },
-            dismissButton = { TextButton(onClick = { action("打开中…") }) { Text("外部打开") } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { action("保存中…") }, enabled = busy == null) { Text(if (busy == "保存中…") "保存中…" else "保存") }
+                    TextButton(onClick = { action("打开中…") }, enabled = busy == null) { Text("外部打开") }
+                }
+            },
             title = { Text(shown.name, maxLines = 2) },
-            text = { NetworkImage(model = authenticatedImageRequest(context, shown.url, headers),
-                contentDescription = shown.name, contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxWidth().height(360.dp)) })
+            text = {
+                Column {
+                    NetworkImage(model = authenticatedImageRequest(context, shown.url, headers),
+                        contentDescription = shown.name, contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxWidth().height(360.dp))
+                    failure?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall) }
+                }
+            })
     }
 }
 
@@ -694,7 +726,7 @@ private fun sanitizeArtifactFilename(name: String): String {
 // Custom Lightweight Markdown Composable & Parser
 // ---------------------------------------------------------------------------
 
-private sealed class MarkdownBlock {
+internal sealed class MarkdownBlock {
     data class Paragraph(val text: String) : MarkdownBlock()
     data class Header(val level: Int, val text: String) : MarkdownBlock()
     data class ListItem(val ordered: Boolean, val index: Int, val text: String) : MarkdownBlock()
@@ -709,13 +741,15 @@ private fun MarkdownText(
     modifier: Modifier = Modifier,
     textColor: Color = MaterialTheme.colorScheme.onSurface,
     artifactHeaders: Map<String, String> = emptyMap(),
+    resolveGeneratedImage: (suspend (String) -> AgentArtifact)? = null,
+    imageReloadKey: Any? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     val blocks = remember(text) { parseBlocks(text) }
 
     SelectionContainer {
         Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        blocks.forEach { block ->
+        blocks.forEachIndexed { index, block ->
             when (block) {
                 is MarkdownBlock.CodeBlock -> {
                     Card(
@@ -788,7 +822,9 @@ private fun MarkdownText(
                     )
                 }
                 is MarkdownBlock.ImageBlock -> {
-                    MarkdownImage(block, artifactHeaders)
+                    key(index, block.url) {
+                        MarkdownImage(block, artifactHeaders, resolveGeneratedImage, imageReloadKey)
+                    }
                 }
                 is MarkdownBlock.Table -> {
                     MarkdownTable(
@@ -804,7 +840,21 @@ private fun MarkdownText(
 }
 
 @Composable
-private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, String>) {
+private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, String>,
+    resolveGeneratedImage: (suspend (String) -> AgentArtifact)? = null, imageReloadKey: Any? = null) {
+    if (block.url.startsWith("waku-blob:")) {
+        val reference = remember(block.url) { WakuImageReference.parse(block.url) }
+        if (reference == null) {
+            Text("图片引用无效，请重新同步会话", color = MaterialTheme.colorScheme.error)
+        } else {
+            ArtifactCard(artifact = reference.asArtifact(), autoPreview = true, reloadKey = imageReloadKey,
+                previewContentScale = ContentScale.Fit, resolve = {
+                    val resolver = resolveGeneratedImage ?: error("当前消息的图片暂不可用")
+                    resolver(reference.value)
+                })
+        }
+        return
+    }
     val scheme = MaterialTheme.colorScheme
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -957,7 +1007,7 @@ private fun parseTableCells(line: String): List<String> {
 
 private val markdownImageRegex = Regex("!\\[([^\\]]*)\\]\\(([^)]+)\\)")
 
-private fun parseBlocks(text: String): List<MarkdownBlock> {
+internal fun parseBlocks(text: String): List<MarkdownBlock> {
     val lines = text.split("\n")
     val blocks = mutableListOf<MarkdownBlock>()
     var inCodeBlock = false
@@ -1045,7 +1095,7 @@ private fun parseBlocks(text: String): List<MarkdownBlock> {
             markdownImageRegex.matchEntire(trimmed) != null -> {
                 flushParagraph()
                 val match = markdownImageRegex.matchEntire(trimmed)!!
-                blocks.add(MarkdownBlock.ImageBlock(match.groupValues[1].trim(), match.groupValues[2].trim()))
+                blocks.add(MarkdownBlock.ImageBlock(match.groupValues[1].trim(), match.groupValues[2].trim().removeSurrounding("<", ">")))
             }
             trimmed.startsWith("#") -> {
                 flushParagraph()

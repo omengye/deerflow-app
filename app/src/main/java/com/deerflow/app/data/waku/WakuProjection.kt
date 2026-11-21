@@ -162,6 +162,17 @@ object WakuProjection {
             })
     }
 
+    /** Resolve only images belonging to the currently displayed assistant message, including hydrated history. */
+    fun containsImage(snapshot: WakuSnapshot, messageId: String?, reference: String): Boolean {
+        if (messageId == null) return false
+        return snapshot.session.objects("messages").withIndex().any { (index, message) ->
+            val id = message.text("id") ?: stableId("${snapshot.session.text("id")}/message/$index")
+            message.text("role") == "assistant" && id == messageId &&
+                WakuImageReference.inMarkdown(message.text("display_content") ?: message.text("content").orEmpty())
+                    .any { it.value == reference }
+        }
+    }
+
     fun display(snapshot: WakuSnapshot): ConversationState {
         val session = snapshot.session
         val messages = session.objects("messages")

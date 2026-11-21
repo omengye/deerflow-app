@@ -54,7 +54,7 @@ class MessageFileCache(private val directory: File, private val http: OkHttpClie
         } finally { temporary.delete() }
     }
 
-    private fun cached(file: MessageFile): File? {
+    internal fun cached(file: MessageFile): File? {
         val uri = runCatching { URI(file.localUrl) }.getOrNull() ?: return null
         if (uri.scheme != "file") return null
         val local = runCatching { File(uri).canonicalFile }.getOrNull() ?: return null

@@ -454,6 +454,9 @@ fun ChatScreen(
                 itemCount = transcriptItemCount,
                 artifactHeaders = artifactHeaders,
                 resolveMessageFile = { vm.resolveMessageFile(it, state.threadId) },
+                resolveGeneratedImage = { reference, messageId -> vm.resolveGeneratedImage(reference, messageId, state.threadId, profileKey) },
+                imageScopeKey = draftKey,
+                imageReloadKey = connected,
                 proposals = threadProposals,
                 onViewProposal = { proposalId ->
                     proposalVm.select(proposalId)
@@ -516,6 +519,9 @@ private fun Transcript(
     itemCount: androidx.compose.runtime.MutableState<Int>,
     artifactHeaders: Map<String, String>,
     resolveMessageFile: suspend (com.deerflow.app.domain.model.MessageFile) -> com.deerflow.app.domain.model.AgentArtifact,
+    resolveGeneratedImage: suspend (String, String?) -> com.deerflow.app.domain.model.AgentArtifact,
+    imageScopeKey: String,
+    imageReloadKey: Any?,
     proposals: List<SkillProposal>,
     onViewProposal: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -592,7 +598,7 @@ private fun Transcript(
         verticalArrangement = Arrangement.spacedBy(10.dp),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
     ) {
-        items(itemsList, key = { it.key }) { item ->
+        items(itemsList, key = { "$imageScopeKey:${it.key}" }) { item ->
             when (item) {
                 is TranscriptItem.BlockItem -> {
                     val isLastBlock = state.blocks.lastOrNull()?.key == item.block.key
@@ -603,6 +609,8 @@ private fun Transcript(
                         artifactHeaders = artifactHeaders,
                         isStreaming = isStreaming,
                         resolveMessageFile = resolveMessageFile,
+                        resolveGeneratedImage = { reference -> resolveGeneratedImage(reference, item.block.messageId) },
+                        imageReloadKey = imageReloadKey,
                     )
                 }
                 is TranscriptItem.ProposalItem -> ProposalCard(

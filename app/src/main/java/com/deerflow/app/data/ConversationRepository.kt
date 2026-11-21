@@ -119,6 +119,7 @@ class ConversationRepository(
     @Volatile private var active: Link? = null
     @Volatile private var profile: Profile? = null
     private val profiles = mutableMapOf<String, Profile>()
+    private val imageCaches = mutableMapOf<String, WakuImageCache>()
     private data class Selection(val profile: Profile, val id: String)
     @Volatile private var selection: Selection? = null
     private var legacyIndex: List<ThreadMeta> = emptyList()
@@ -884,6 +885,36 @@ class ConversationRepository(
     }
 
     private fun messageCache(p: Profile) = MessageFileCache(File(appContext.cacheDir, "waku-${p.key}/message-files"))
+
+    suspend fun resolveGeneratedImage(reference: String, messageId: String?, threadId: String, profileKey: String): AgentArtifact {
+        val (p, cache) = mutex.withLock {
+            val p = profile ?: error("会话不可用")
+            require(p.key == profileKey && p.selected == threadId &&
+                p.snapshots[threadId]?.let { WakuProjection.containsImage(it, messageId, reference) } == true) {
+                "会话已变化，请重新打开图片"
+            }
+            p to imageCaches.getOrPut(p.key) { WakuImageCache(File(appContext.cacheDir, "waku-${p.key}/generated-images")) }
+        }
+        val image = cache.resolve(reference) { command ->
+            val link = mutex.withLock {
+                require(profile === p && p.selected == threadId &&
+                    p.snapshots[threadId]?.let { WakuProjection.containsImage(it, messageId, reference) } == true) {
+                    "会话已变化，请重新打开图片"
+                }
+                active?.takeIf { it.profile === p && _isConnected.value } ?: error("请连接服务器后重试加载图片")
+            }
+            val response = link.client.request(command, timeoutMs = 120_000)
+            mutex.withLock { ensureCurrent(link) }
+            response
+        }
+        mutex.withLock {
+            require(profile === p && p.selected == threadId &&
+                p.snapshots[threadId]?.let { WakuProjection.containsImage(it, messageId, reference) } == true) {
+                "会话已变化，请重新打开图片"
+            }
+        }
+        return image
+    }
 
     suspend fun resolveMessageFile(file: MessageFile, threadId: String): AgentArtifact {
         val p = mutex.withLock {

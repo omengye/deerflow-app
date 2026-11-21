@@ -1,0 +1,58 @@
+{
+  "validated_on": "2026-11-12",
+  "feature": "Native generated images in assistant messages",
+  "protocol": {
+    "version": 12,
+    "message_content": "Markdown image with a waku-blob: reference",
+    "read_command": "readBlob",
+    "backend_changes_required": false
+  },
+  "build": {
+    "command": "./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --offline",
+    "result": "BUILD SUCCESSFUL",
+    "unit_tests": 235,
+    "passed": 234,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1,
+    "skip_reason": "Existing opt-in S3 integration test requires private configuration",
+    "lint_errors": 0,
+    "lint_warnings": 25,
+    "apk_sha256": "ffaf15d94df5cda6ac2651e5ca95a18530636687e6d5a720b502373692aa1bcb"
+  },
+  "automated_coverage": [
+    "Ordered text and multiple image chunks, including fragmented Markdown",
+    "Local atomic snapshot restoration and fresh server history projection",
+    "Image reference belongs to the displayed assistant message",
+    "PNG, JPEG, GIF and WebP MIME types and filename extensions",
+    "Cached images remain readable after recreating the cache object offline",
+    "Missing bytes, corrupt bytes, corrupt index and full cache eviction trigger a new read",
+    "Profile isolation and concurrent duplicate download suppression",
+    "Failed and cancelled downloads remain retryable",
+    "Invalid references, response types, Base64, formats and oversized responses are rejected",
+    "Incomplete Markdown and fenced examples do not render as images"
+  ],
+  "device_validation": {
+    "device": "Isolated Android API 37 emulator",
+    "backend": "Local synthetic Waku v12 fixture using readBlob; no provider generation call",
+    "passed": [
+      "Fresh server history renders the generated image inline",
+      "Image preview opens with the full image and a Save button",
+      "Saving from preview writes PNG to Download/deerflow",
+      "Saved file is byte-for-byte identical to the server fixture",
+      "Force-stop and restart restore the image without another blob read",
+      "Force-stop and restart offline restore the cached image",
+      "Evicting image bytes while offline displays a retryable error",
+      "Reconnecting automatically reloads the missing image without regenerating it"
+    ],
+    "blob_reads": 2,
+    "blob_read_explanation": "One initial download, one after explicit image cache eviction",
+    "generation_prompts_sent": 0,
+    "saved_png_sha256": "b376744416b45ae29b65ffd35cbaea41db5f29e3573bfb751032965a917d334a"
+  },
+  "limitations": [
+    "Production image generation was not invoked",
+    "Images are previewed as static bitmaps",
+    "A missing local cache requires the server to retain the original blob"
+  ]
+}
