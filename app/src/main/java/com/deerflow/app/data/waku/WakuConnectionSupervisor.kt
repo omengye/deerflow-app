@@ -95,4 +95,9 @@ data class WakuConnectionDiagnostic(
     val elapsedMillis: Long,
     val failure: WakuConnectionFailure? = null,
     val transport: String? = null,
+    val commandType: String? = null,
+    val requestBytes: Int? = null,
+    val queuedBytes: Long? = null,
+    val requestFailure: WakuRequestFailure? = null,
+    val generation: Long? = null,
 )

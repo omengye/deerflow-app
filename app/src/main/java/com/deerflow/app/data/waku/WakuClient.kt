@@ -141,8 +141,12 @@ class WakuClient(
             put("runtimeId", runtimeId)
             put("command", command)
         }.toString()
-        if (wire.toByteArray(Charsets.UTF_8).size > MAX_WAKU_WIRE_BYTES) {
-            throw WakuRequestException(WakuDelivery.NOT_SENT, requestId, "请求超过服务器消息大小限制")
+        val wireBytes = wire.toByteArray(Charsets.UTF_8).size
+        val commandType = command.string("type").orEmpty()
+        if (wireBytes > MAX_WAKU_REQUEST_BYTES) {
+            synchronized(lock) { requestDiagnostic(commandType, wireBytes, active?.socket?.queueSize(), WakuRequestFailure.TOO_LARGE) }
+            throw WakuRequestException(WakuDelivery.NOT_SENT, requestId,
+                "本次操作的数据过大，尚未发送；其他会话仍可使用", failure = WakuRequestFailure.TOO_LARGE)
         }
         val entry: Pending
         synchronized(lock) {
@@ -154,6 +158,13 @@ class WakuClient(
             if (pending.containsKey(requestId)) {
                 throw WakuRequestException(WakuDelivery.NOT_SENT, requestId, "同一请求正在等待结果")
             }
+            val queuedBytes = socket.queueSize()
+            val queueLimit = if (wireBytes <= WAKU_CONTROL_BYTES) MAX_WAKU_CONTROL_QUEUE_BYTES else MAX_WAKU_REQUEST_BYTES
+            if (queuedBytes + wireBytes > queueLimit) {
+                requestDiagnostic(commandType, wireBytes, queuedBytes, WakuRequestFailure.QUEUE_FULL)
+                throw WakuRequestException(WakuDelivery.NOT_SENT, requestId,
+                    "连接发送队列繁忙，此操作尚未发送，请稍后重试", failure = WakuRequestFailure.QUEUE_FULL)
+            }
             entry = Pending(attempt)
             pending[requestId] = entry
             // Mark before send: once accepted by OkHttp, loss of a response is ambiguous.
@@ -163,14 +174,20 @@ class WakuClient(
                     pending.remove(requestId)
                     entry.sent = false
                     entry.result.completeExceptionally(
-                        WakuRequestException(WakuDelivery.NOT_SENT, requestId, "连接未接受请求"),
+                        WakuRequestException(WakuDelivery.NOT_SENT, requestId,
+                            "连接已失效，正在重新连接；此操作未发送", failure = WakuRequestFailure.TRANSPORT),
                     )
+                    requestDiagnostic(commandType, wireBytes, queuedBytes, WakuRequestFailure.TRANSPORT)
+                    fail(attempt, connectionError(WakuConnectionFailure.NETWORK), "send_refused")
                 }
             } catch (_: Exception) {
                 pending.remove(requestId)
                 entry.result.completeExceptionally(
-                    WakuRequestException(WakuDelivery.RESULT_UNKNOWN, requestId, "发送中断，请先核对服务器状态"),
+                    WakuRequestException(WakuDelivery.RESULT_UNKNOWN, requestId,
+                        "发送中断，正在重新连接；请先核对服务器状态", failure = WakuRequestFailure.TRANSPORT),
                 )
+                requestDiagnostic(commandType, wireBytes, queuedBytes, WakuRequestFailure.TRANSPORT)
+                fail(attempt, connectionError(WakuConnectionFailure.NETWORK), "send_exception")
             }
         }
         return try {
@@ -356,7 +373,17 @@ class WakuClient(
                     ),
                 )
             }
-            attempt.socket?.cancel()
+            runCatching { attempt.socket?.cancel() }
+        }
+    }
+
+    private fun requestDiagnostic(command: String, bytes: Int, queued: Long?, failure: WakuRequestFailure) {
+        val attempt = active ?: latest
+        runCatching {
+            diagnostics(WakuConnectionDiagnostic("request_not_accepted",
+                attempt?.let { clockMillis() - it.startedAtMillis } ?: 0,
+                commandType = command, requestBytes = bytes, queuedBytes = queued,
+                requestFailure = failure, generation = attempt?.generation))
         }
     }
 

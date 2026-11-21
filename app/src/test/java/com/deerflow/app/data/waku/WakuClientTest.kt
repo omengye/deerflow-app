@@ -9,6 +9,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.*
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
@@ -211,6 +212,63 @@ class WakuClientTest {
         val unqueued = runCatching { client.request(wakuCommand("prompt")) }.exceptionOrNull() as WakuRequestException
         assertEquals(WakuDelivery.NOT_SENT, unqueued.delivery)
         assertEquals(1, factory.sockets.single().sent.size)
+        assertFalse(client.health.connected)
+        assertTrue(client.state.value is WakuConnectionState.Disconnected)
+        assertTrue(factory.sockets.single().cancelled)
+        client.close()
+    }
+
+    @Test fun refusedSendRetiresSocketAndKeepsAlreadySentWorkUnknownWithoutReplaying() = runBlocking {
+        val factory = FakeFactory()
+        val client = client(factory)
+        open(client, factory)
+        val old = factory.sockets.single()
+        val pending = async { runCatching { client.request(wakuCommand("prompt")) } }
+        yield()
+        old.acceptSends = false
+        val refused = runCatching { client.request(wakuCommand("removeSession")) }.exceptionOrNull() as WakuRequestException
+        assertEquals(WakuDelivery.NOT_SENT, refused.delivery)
+        assertEquals(WakuDelivery.RESULT_UNKNOWN, (pending.await().exceptionOrNull() as WakuRequestException).delivery)
+        assertFalse(client.health.connected)
+        open(client, factory)
+        old.failure()
+        assertEquals(WakuConnectionState.Connected, client.state.value)
+        assertEquals(1, factory.sockets.last().sent.size) // Only hello; no mutation is replayed.
+        client.close()
+    }
+
+    @Test fun queueAdmissionPreservesConnectionAndLeavesCapacityForSmallControls() = runBlocking {
+        val factory = FakeFactory()
+        val client = client(factory)
+        open(client, factory)
+        val socket = factory.sockets.single()
+        socket.queuedBytes = MAX_WAKU_REQUEST_BYTES.toLong()
+        val large = wakuCommand("saveTaskState") { put("fixture", "x".repeat(WAKU_CONTROL_BYTES)) }
+        val blocked = runCatching { client.request(large) }.exceptionOrNull() as WakuRequestException
+        assertEquals(WakuRequestFailure.QUEUE_FULL, blocked.failure)
+        assertEquals(WakuDelivery.NOT_SENT, blocked.delivery)
+        assertEquals(WakuConnectionState.Connected, client.state.value)
+        val control = async { client.request(wakuCommand("cancel"), requestId = requestId) }
+        yield()
+        socket.message("""{"type":"response","requestId":"$requestId","outcome":{"status":"ok","payload":{"type":"ack"}}}""")
+        assertEquals("ack", control.await().string("type"))
+        assertFalse(socket.cancelled)
+        client.close()
+    }
+
+    @Test fun sendExceptionRetiresSocketButRetainsDeliveryUncertainty() = runBlocking {
+        val factory = FakeFactory()
+        val client = client(factory)
+        open(client, factory)
+        val socket = factory.sockets.single()
+        socket.throwOnSend = true
+        val error = runCatching { client.request(wakuCommand("prompt")) }.exceptionOrNull() as WakuRequestException
+        assertEquals(WakuDelivery.RESULT_UNKNOWN, error.delivery)
+        assertEquals(WakuRequestFailure.TRANSPORT, error.failure)
+        assertFalse(client.health.connected)
+        assertTrue(socket.cancelled)
+        open(client, factory)
+        assertEquals(1, factory.sockets.last().sent.size)
         client.close()
     }
 
@@ -314,10 +372,13 @@ class WakuClientTest {
     private class FakeSocket(private val request: Request, val listener: WebSocketListener) : WebSocket {
         val sent = mutableListOf<String>()
         var acceptSends = true
+        var throwOnSend = false
         var cancelled = false
+        var queuedBytes = 0L
         override fun request() = request
-        override fun queueSize() = 0L
+        override fun queueSize() = queuedBytes
         override fun send(text: String): Boolean {
+            if (throwOnSend) throw IOException("send failed")
             if (!acceptSends || cancelled) return false
             sent += text
             return true

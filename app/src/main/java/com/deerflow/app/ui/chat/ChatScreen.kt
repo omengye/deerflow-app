@@ -642,7 +642,7 @@ private fun StatusBar(state: ConversationState) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(modifier = Modifier.weight(1f).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             val statusColor = if (state.running) scheme.primary else scheme.onSurface.copy(alpha = 0.35f)
             Box(
                 modifier = Modifier
@@ -658,6 +658,7 @@ private fun StatusBar(state: ConversationState) {
         }
         Text(
             text = "msgs: ${state.messageCount}  -  ${state.threadId.take(12)}",
+            maxLines = 1,
             style = MaterialTheme.typography.labelSmall,
             color = scheme.onSurface.copy(alpha = 0.4f)
         )

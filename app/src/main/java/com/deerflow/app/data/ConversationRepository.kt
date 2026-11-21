@@ -89,6 +89,7 @@ class ConversationRepository(
         val syncing = mutableSetOf<String>()
         val syncStatus = mutableMapOf<String, String>()
         val syncErrors = mutableMapOf<String, String>()
+        val saveErrors = mutableMapOf<String, String>()
         val blocked = mutableMapOf<String, String>()
         val artifacts = mutableMapOf<String, List<AgentArtifact>>()
         val artifactErrors = mutableMapOf<String, String>()
@@ -112,6 +113,8 @@ class ConversationRepository(
         val catalogChanges = Channel<Unit>(Channel.CONFLATED)
         val titleChecked = mutableMapOf<String, JsonObject>()
         val catalogRefresh = Mutex()
+        val persistence = Mutex()
+        val checkpoints = WakuCheckpointWriter()
         val artifactJobs = mutableMapOf<String, Job>()
         lateinit var artifacts: WakuTaskArtifacts
         lateinit var toolApproval: WakuToolApproval
@@ -225,7 +228,7 @@ class ConversationRepository(
             setConnection(current, if (attempt == 0) "正在连接服务器…" else "连接中断，正在重新同步…", false)
             val link = Link(current, WakuClient(current.config.endpoint, current.config.token, UUID.randomUUID().toString(), incomingCapacity = 512,
                 clockMillis = android.os.SystemClock::elapsedRealtime,
-                diagnostics = { event -> android.util.Log.i("WakuConnection", "stage=${event.stage} elapsedMs=${event.elapsedMillis} failure=${event.failure} transport=${event.transport}") },
+                diagnostics = { event -> android.util.Log.i("WakuConnection", "stage=${event.stage} elapsedMs=${event.elapsedMillis} failure=${event.failure} transport=${event.transport} command=${event.commandType} bytes=${event.requestBytes} queued=${event.queuedBytes} requestFailure=${event.requestFailure} generation=${event.generation}") },
             ))
             link.forceHydration = forceHydration.getAndSet(false)
             link.artifacts = WakuTaskArtifacts(File(appContext.cacheDir, "waku-${current.key}"),
@@ -371,7 +374,9 @@ class ConversationRepository(
                 withTimeoutOrNull(2_000) { link.checkpoint.receive() }
                 try { checkpoint(link) }
                 catch (cancelled: CancellationException) { throw cancelled }
-                catch (error: Exception) { setConnection(link.profile, "会话正在本地保存；服务器同步失败：${error.message}", true) }
+                catch (error: Exception) {
+                    if (link.client.state.value !is WakuConnectionState.Connected) link.ended.complete(error)
+                }
             }
         }
         val recoveryJobs = mutableListOf<Job>()
@@ -946,19 +951,23 @@ class ConversationRepository(
         return result
     }
 
-    private suspend fun checkpoint(link: Link) {
+    private suspend fun checkpoint(link: Link) = link.persistence.withLock {
         val captured = mutex.withLock {
             ensureCurrent(link)
             link.profile.serverDirty.filter { it in link.profile.ready && it !in link.profile.syncing && it !in link.profile.blocked && it in link.profile.remoteIds &&
                 link.profile.snapshots[it]?.pendingHistory == null }
                 .mapNotNull { id -> link.profile.snapshots[id]?.let { id to it } }.toMap()
         }
-        if (captured.isEmpty()) return
-        saveRemote(link, captured.values.map { it.session })
-        mutex.withLock {
-            ensureCurrent(link)
-            captured.forEach { (id, value) -> if (link.profile.snapshots[id] === value) link.profile.serverDirty -= id }
-        }
+        link.checkpoints.save(captured.values.map { it.session },
+            persist = { session -> ensureCurrent(link); saveRemote(link, listOf(session)) },
+            connected = { link.client.state.value == WakuConnectionState.Connected },
+            report = { id, error -> mutex.withLock {
+                ensureCurrent(link)
+                if (error == null) link.profile.saveErrors.remove(id)
+                else link.profile.saveErrors[id] = "此会话暂未同步：${error.message ?: "请重新同步"}"
+                publish(link.profile)
+            } },
+        )
     }
 
     private suspend fun saveRemote(link: Link, sessions: List<JsonObject>) {
@@ -971,13 +980,18 @@ class ConversationRepository(
             put("projects", JsonArray(projects)); put("liveSessionIds", JsonArray(emptyList())); put("sessions", JsonArray(sessions))
         })
         require(result.s("type") == "taskStateSaved") { "服务器未确认会话保存" }
+        val confirmed = result.objs("sessions").associateBy { it.s("id") }
         mutex.withLock {
             ensureCurrent(link)
             for (session in sessions) session.s("id")?.let { id ->
-                link.profile.remoteIds += id; link.profile.drafts -= id
+                val saved = confirmed[id] ?: error("服务器未确认此会话保存，请重新同步")
                 link.profile.snapshots[id]?.let { snapshot ->
-                    if (!snapshot.remoteKnown) putSnapshot(link.profile, id, snapshot.copy(remoteKnown = true), false)
+                    val merged = WakuSavedSession.merge(snapshot, session, saved)
+                    if (snapshot.session === session) link.profile.serverDirty -= id
+                    if (merged != snapshot) putSnapshot(link.profile, id, merged, false)
                 }
+                link.profile.remoteIds += id; link.profile.drafts -= id
+                link.profile.saveErrors.remove(id)
             }
         }
     }
@@ -1528,7 +1542,11 @@ class ConversationRepository(
         if (active !== link || profile !== link.profile) throw CancellationException("Connection was superseded")
     }
     private suspend fun setConnection(p: Profile, text: String, connected: Boolean) = mutex.withLock {
-        if (profile === p) { _connection.value = text; _isConnected.value = connected; publish(p) }
+        if (profile === p) {
+            _connection.value = text
+            _isConnected.value = connected && active?.takeIf { it.profile === p }?.client?.state?.value == WakuConnectionState.Connected
+            publish(p)
+        }
     }
     private suspend fun showError(p: Profile, text: String) = mutex.withLock {
         if (profile === p) { _connection.value = text; publish(p) }
@@ -1536,6 +1554,7 @@ class ConversationRepository(
 
     private fun publish(p: Profile) {
         if (profile !== p) return
+        _isConnected.value = active?.takeIf { it.profile === p }?.client?.state?.value == WakuConnectionState.Connected
         val rows = p.catalog.toMutableMap().apply { p.snapshots.forEach { (id, snapshot) -> put(id, snapshot.session) } }
         _threads.value = rows.values.filter { it.s("provider") == "deerFlow" }.mapNotNull { session ->
             val id = session.s("id") ?: return@mapNotNull null
@@ -1561,6 +1580,7 @@ class ConversationRepository(
             _state.value = _state.value.copy(status = "会话历史操作尚未完成，请在桌面恢复后重新同步。")
         }
         p.syncErrors[p.selected]?.let { _state.value = _state.value.copy(status = it) }
+        p.saveErrors[p.selected]?.let { _state.value = _state.value.copy(status = it) }
         if (p.selected in p.syncing) _state.value = _state.value.copy(status = p.syncStatus[p.selected] ?: "正在同步会话…")
         _taskFiles.value = TaskFilesState(p.artifacts[p.selected].orEmpty(),
             active?.takeIf { it.profile === p }?.artifactJobs?.get(p.selected)?.isActive == true,

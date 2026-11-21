@@ -12,6 +12,11 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 const val WAKU_PROTOCOL_VERSION = 12
 const val NIL_UUID = "00000000-0000-0000-0000-000000000000"
 internal const val MAX_WAKU_WIRE_BYTES = 48 * 1024 * 1024
+// OkHttp closes its socket when queued outbound bytes exceed 16 MiB. Keep bulk
+// writes below that ceiling and reserve capacity for prompts and controls.
+internal const val MAX_WAKU_REQUEST_BYTES = 15 * 1024 * 1024
+internal const val WAKU_CONTROL_BYTES = 64 * 1024
+internal const val MAX_WAKU_CONTROL_QUEUE_BYTES = 16 * 1024 * 1024 - WAKU_CONTROL_BYTES
 
 val WakuJson = Json { ignoreUnknownKeys = true }
 
@@ -57,11 +62,14 @@ internal fun requireWakuUuid(value: String, field: String) {
 
 enum class WakuDelivery { NOT_SENT, RESULT_UNKNOWN, REJECTED }
 
+enum class WakuRequestFailure { TOO_LARGE, QUEUE_FULL, TRANSPORT }
+
 class WakuRequestException(
     val delivery: WakuDelivery,
     val requestId: String,
     message: String,
     cause: Throwable? = null,
+    val failure: WakuRequestFailure? = null,
 ) : Exception(message, cause)
 
 enum class WakuConnectionFailure {
