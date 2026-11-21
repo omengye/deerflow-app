@@ -34,6 +34,11 @@ class WakuCommandPolicyTest {
             command("stop", "cancel", "accepted"), command("prompt", "prompt", "accepted"))
         assertEquals(listOf("approval", "stop", "prompt"), WakuCommandPolicy.acknowledge(pending).map { it["requestId"]!!.jsonPrimitive.content })
     }
+    @Test fun turnCompletionResolvesControlsButCannotConfirmDeletion() {
+        val pending = listOf(command("delete", "removeSession", "unknown"), command("stop", "cancel", "accepted"),
+            command("reply", "respondUserInput", "accepted"), command("prompt", "prompt", "unknown"))
+        assertEquals(listOf("delete", "prompt"), WakuCommandPolicy.afterTurnFinished(pending).map { it.string("requestId") })
+    }
     private fun command(id: String, kind: String, state: String, target: String? = null) = buildJsonObject {
         put("requestId", id); put("kind", kind); put("state", state); put("targetRequestId", target?.let(::JsonPrimitive) ?: JsonNull)
     }

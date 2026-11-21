@@ -58,6 +58,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
@@ -118,6 +119,7 @@ fun ChatScreen(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val threads by vm.threads.collectAsStateWithLifecycle()
+    val deletion by vm.deletion.collectAsStateWithLifecycle()
     val sessionTitle = threads.firstOrNull { it.id == state.threadId }?.title ?: "DeerFlow"
     val proposalState by proposalVm.state.collectAsStateWithLifecycle()
     val artifactHeaders by vm.artifactHeaders.collectAsStateWithLifecycle()
@@ -301,6 +303,7 @@ fun ChatScreen(
                                 }
                                 IconButton(
                                     onClick = { vm.deleteThread(meta.id) },
+                                    enabled = !meta.id.startsWith("legacy:") && deletion?.inProgress != true,
                                     modifier = Modifier.size(24.dp)
                                 ) {
                                     Icon(
@@ -465,6 +468,35 @@ fun ChatScreen(
                 modifier = Modifier.padding(padding),
             )
         }
+    }
+
+    deletion?.takeIf { it.profileKey == profileKey }?.let { deleting ->
+        AlertDialog(
+            onDismissRequest = vm::dismissDeletion,
+            title = { Text(if (deleting.inProgress) "正在删除会话" else "未能删除会话") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(threads.firstOrNull { it.id == deleting.threadId }?.title ?: "所选会话")
+                    if (deleting.inProgress) {
+                        Text("正在等待服务器确认删除…")
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                    } else {
+                        Text(deleting.error.orEmpty())
+                        Text("本地会话记录和草稿已保留。请核对上方原因，重新同步后查看会话状态。")
+                    }
+                }
+            },
+            confirmButton = {
+                if (!deleting.inProgress) TextButton(onClick = {
+                    vm.dismissDeletion()
+                    vm.selectThread(deleting.threadId)
+                    coroutineScope.launch { drawerState.close() }
+                }) { Text("查看会话") }
+            },
+            dismissButton = {
+                if (!deleting.inProgress) TextButton(onClick = vm::dismissDeletion) { Text("关闭") }
+            },
+        )
     }
 
     if (renameThreadMeta != null) {

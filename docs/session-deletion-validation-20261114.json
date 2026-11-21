@@ -1,0 +1,52 @@
+{
+  "validated_on": "2026-11-14",
+  "feature": "Delete sessions containing generated images",
+  "diagnosis": [
+    "The daemon checks persisted session status and queued messages before deleting provider state or image assets.",
+    "The mobile deletion path did not await the final session projection save, so a completed turn could be checked against an older busy state.",
+    "The old mobile implementation classified explicit delete refusal as unknown and cleared the composer draft before success."
+  ],
+  "changes": [
+    "Synchronize the deletion target and await saveTaskState before removeSession; serialize periodic saves and deletion.",
+    "Use NIL runtime and a 60-second timeout, longer than the daemon native deletion wait.",
+    "Require an ACK before local cleanup; preserve history and draft on failure.",
+    "Surface progress and errors above the history drawer; provide a link back to the target session.",
+    "Keep unknown outcomes for recovery and do not treat turn completion as deletion confirmation."
+  ],
+  "build": {
+    "command": "gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --offline",
+    "result": "BUILD SUCCESSFUL",
+    "tests": 243,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1,
+    "passed": 242,
+    "lint_errors": 0,
+    "lint_warnings": 25,
+    "apk": "dist/deerflow-session-delete-debug.apk",
+    "apk_sha256": "97191422c0a3f067ad2fbb7679fece926aadb5bbd7df1df32ebc438b4625feaa"
+  },
+  "automated_coverage": [
+    "Completed generated image turn with a stale working server projection waits for save acknowledgement before delete.",
+    "Actual busy refusal preserves history and draft without an unknown deletion command.",
+    "Save or journal failure does not dispatch deletion or leave a permanent sending command.",
+    "Timeout, uncertain native reply, malformed acknowledgement and cancellation retain uncertain deletion state.",
+    "Unsent retry does not erase earlier uncertainty; terminal turn events resolve controls but not deletion."
+  ],
+  "device_validation": {
+    "device": "Isolated Android API 37 emulator",
+    "server": "Local synthetic Waku v12 fixture",
+    "passed": [
+      "Hydrated generated image renders inline.",
+      "Server busy refusal appears over the history drawer with its original reason.",
+      "Returning to the target retains the generated image and unsent draft, with no new unknown-result warning.",
+      "ACK removes the image conversation; force-stop and restart does not resurrect it.",
+      "Request log confirms saveTaskState before removeSession, correct session ID and NIL runtime.",
+      "No prompt, start or cancel commands were sent."
+    ]
+  },
+  "limitations": [
+    "No physical phone or production server deletion was performed.",
+    "Genuinely running, queued or unresolved provider tasks remain subject to server deletion guards."
+  ]
+}

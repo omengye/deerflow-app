@@ -774,7 +774,7 @@ class ConversationRepository(
         val eventKind = (wire["event"] as? JsonObject)?.s("kind")
         if (eventKind in setOf("promptSubmitted", "turnStarted")) link.artifactJobs[id]?.cancel()
         if (eventKind in setOf("turnFinished", "processExited")) {
-            snapshot = snapshot.copy(pendingCommands = snapshot.pendingCommands.filter { it.s("kind") == "prompt" })
+            snapshot = snapshot.copy(pendingCommands = WakuCommandPolicy.afterTurnFinished(snapshot.pendingCommands))
             link.checkpoint.trySend(Unit)
             if (eventKind == "turnFinished" && link.runtimes[id]?.catchingUp == false) {
                 wire.s("runtimeId")?.let { scheduleArtifacts(link, id, it) }
@@ -1310,29 +1310,56 @@ class ConversationRepository(
         }
     }
 
-    fun deleteThread(id: String) = userOperation { link, _ ->
+    suspend fun deleteThread(id: String, expectedProfileKey: String) = withContext(Dispatchers.IO) { operations.withLock {
+        val link = active ?: error("请先连接并同步服务器")
+        ensureCurrent(link)
+        require(link.profile.key == expectedProfileKey) { "服务器配置已切换，请重新选择会话" }
+        require(_isConnected.value) { "请先连接并同步服务器" }
         require(!id.startsWith("legacy:")) { "旧 AG-UI 历史只读，未修改原文件" }
-        val isRemote = mutex.withLock { id in link.profile.remoteIds }
-        if (isRemote) {
-            val runtime = mutex.withLock { link.runtimes[id]?.id ?: NIL_UUID }
-            val requestId = UUID.randomUUID().toString()
-            if (link.profile.snapshots[id] == null) hydrateAttach(link, id)
-            addPending(link, id, buildJsonObject { put("kind", "removeSession"); put("requestId", requestId); put("state", "sending") })
-            try { link.client.request(wakuCommand("removeSession"), id, runtime, requestId) }
-            catch (error: Exception) { updatePending(link, id, requestId, "unknown"); throw error }
+        // Serialize against periodic saves, including their acknowledgements, until local cleanup finishes.
+        link.persistence.withLock {
+            val isRemote = mutex.withLock { id in link.profile.remoteIds }
+            if (isRemote) {
+                WakuSessionDeletion(
+                    prepare = {
+                        // Load only when needed to durably record the deletion. Native deletion
+                        // checks actual execution state; it must not depend on uploading history.
+                        val needsSnapshot = mutex.withLock { ensureCurrent(link); id !in link.profile.snapshots }
+                        if (needsSnapshot) hydrateSnapshot(link, id)
+                    },
+                    record = { command -> addPending(link, id, command) },
+                    settle = { requestId, state, message ->
+                        if (state != null) updatePending(link, id, requestId, state, errorMessage = message)
+                        else mutex.withLock {
+                            val p = link.profile
+                            p.snapshots[id]?.let { snapshot ->
+                                putSnapshot(p, id, snapshot.copy(pendingCommands = snapshot.pendingCommands.filterNot {
+                                    it.s("requestId") == requestId
+                                }), false)
+                                flushLocal(p); publish(p)
+                            }
+                        }
+                    },
+                    request = { requestId, timeout ->
+                        ensureCurrent(link)
+                        link.client.request(wakuCommand("removeSession"), id, NIL_UUID, requestId, timeoutMs = timeout)
+                    },
+                ).remove()
+            }
+            mutex.withLock {
+                ensureCurrent(link)
+                val p = link.profile
+                link.artifactJobs.remove(id)?.cancel()
+                p.store.delete(id); p.snapshots.remove(id); p.catalog.remove(id); p.remoteIds -= id; p.drafts -= id
+                p.localDirty -= id; p.serverDirty -= id; p.ready -= id; p.syncing -= id
+                p.blocked.remove(id); p.artifacts.remove(id); p.artifactErrors.remove(id)
+                p.syncErrors.remove(id); p.syncStatus.remove(id); link.runtimes.remove(id)
+                p.saveErrors.remove(id); link.checkpoints.forget(id)
+                if (p.selected == id) { p.selected = UUID.randomUUID().toString(); createDraft(p, p.selected); p.ready += p.selected }
+                publish(p)
+            }
         }
-        mutex.withLock {
-            ensureCurrent(link)
-            val p = link.profile
-            link.artifactJobs.remove(id)?.cancel()
-            p.store.delete(id); p.snapshots.remove(id); p.catalog.remove(id); p.remoteIds -= id; p.drafts -= id
-            p.localDirty -= id; p.serverDirty -= id; p.ready -= id; p.syncing -= id
-            p.blocked.remove(id); p.artifacts.remove(id); p.artifactErrors.remove(id)
-            p.syncErrors.remove(id); p.syncStatus.remove(id); link.runtimes.remove(id)
-            if (p.selected == id) { p.selected = UUID.randomUUID().toString(); createDraft(p, p.selected); p.ready += p.selected }
-            publish(p)
-        }
-    }
+    } }
 
     fun renameThread(id: String, newTitle: String) = scope.launch {
         if (id.startsWith("legacy:")) {
@@ -1405,22 +1432,6 @@ class ConversationRepository(
         flushLocal(p)
         publish(p)
         text to attachments
-    }
-
-    private fun userOperation(action: suspend (Link, String) -> Unit): Job {
-        val capturedLink = active
-        val capturedId = selection?.id ?: _state.value.threadId
-        return scope.launch { operations.withLock {
-            val link = capturedLink ?: run { _connection.value = "请先连接并同步服务器"; return@launch }
-            try {
-                ensureCurrent(link)
-                require(_isConnected.value) { "请先连接并同步服务器" }
-                require(!capturedId.startsWith("legacy:")) { "旧历史只读，请新建 Waku 会话" }
-                action(link, capturedId)
-            }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { showError(link.profile, error.message ?: "操作失败") }
-        } }
     }
 
     private suspend fun addPending(link: Link, id: String, command: JsonObject) {

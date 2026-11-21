@@ -21,5 +21,9 @@ object WakuCommandPolicy {
         it.value("state") in setOf("prepared", "sending", "accepted")
     }
 
+    fun afterTurnFinished(commands: List<JsonObject>): List<JsonObject> = commands.filterNot {
+        it.value("kind") in setOf("cancel", "respond", "respondUserInput")
+    }
+
     private fun JsonObject.value(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 }

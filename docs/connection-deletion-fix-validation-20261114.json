@@ -1,0 +1,101 @@
+{
+  "validated_on": "2026-11-14",
+  "feature": "Isolate oversized session saves, recover refused sends, and delete image sessions without uploading history",
+  "version": "2.4.1",
+  "version_code": 15,
+  "diagnosis": {
+    "confirmed": [
+      "OkHttp 4.12.0 limits its outgoing WebSocket queue to 16 MiB, while the previous client only checked a 48 MiB wire limit.",
+      "When WebSocket.send returned false, the previous client reported NOT_SENT but retained Connected state. A subsequent small prompt could fail on the same unusable socket.",
+      "The previous deletion fix required saving full history before removeSession; the daemon also rejected saved busy projections before consulting native execution state."
+    ],
+    "phone_limitation": "The original triggering payload size on the user's phone is not available. Oversize and refused-send behavior were reproduced locally; no claim is made that a particular phone request exceeded the limit."
+  },
+  "changes": [
+    "Limit each outbound request to 15 MiB of serialized UTF-8; bound queued bytes and reserve room for small controls before calling send.",
+    "Retire a socket immediately after send refusal or exception, publish Disconnected, and let the existing supervisor reconnect without replaying mutations.",
+    "Save one session per checkpoint request; pause an unchanged oversized snapshot and back off transient failures per session.",
+    "Adopt confirmed server blob references only for the acknowledged session version, preserving newer local events and pending operations.",
+    "Delete without a mandatory full-history save; retain local history and drafts until an explicit ACK.",
+    "For identified DeerFlow sessions, let the native deletion fence check actual execution state. Preserve protection for queued work and busy sessions without native authority.",
+    "Show actual failure reasons and prevent long status text from squeezing the message count into a vertical column."
+  ],
+  "android_build": {
+    "command": "gradlew.bat :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --offline",
+    "result": "BUILD SUCCESSFUL",
+    "tests": 253,
+    "passed": 252,
+    "skipped": 1,
+    "failures": 0,
+    "errors": 0,
+    "lint_errors": 0,
+    "lint_warnings": 25,
+    "apk": "dist/deerflow-connection-fix-debug.apk",
+    "sha256": "de4ef0ff9b25cfea9180b93320e67155ebca480ac757d98c83856d9d62a0d0c3"
+  },
+  "backend_tests": {
+    "source": "deerflow-api/desktop-app/crates/waku-core/src/daemon/session_deletion.rs",
+    "rust_command": "cargo test -p waku-core --lib session_deletion --offline",
+    "rust_passed": 10,
+    "go_command": "go test ./internal/runtime -run 'Test(Delete|ExplicitDelete|GraphPersistenceFailureBlocksDeletion|SessionCleanupPreservesTerminalUnknownUntilExplicitDelete|TerminalUnknownCleanupStillChecksExecutionAndBudgetAttempts|TerminalUnknownBackgroundGraphCanBeArchivedAndDeleted)' -count=1",
+    "go_reported_passed_including_subtests": 51,
+    "coverage": [
+      "Native confirmation removes a stale working projection.",
+      "Native busy refusal retains history and releases the deletion fence.",
+      "Queued Waku work and busy sessions without native authority remain protected.",
+      "Unknown outcomes, interrupted local cleanup, restart recovery and stale snapshot resurrection guards remain intact."
+    ]
+  },
+  "transport_tests": [
+    "A real OkHttp WebSocket rejects an 18 MiB UTF-8 save locally while a subsequent prompt and removeSession succeed on the same connection.",
+    "A refused send cancels the socket and marks earlier accepted requests unknown; reconnect does not replay them.",
+    "A send exception retires the socket and preserves delivery uncertainty.",
+    "Bulk queue admission leaves room for small controls without closing the connection.",
+    "Per-session save isolation, retry backoff and version-safe canonical acknowledgement merging are covered."
+  ],
+  "device_validation": {
+    "device": "Isolated Android API 37 emulator, versionCode 15",
+    "server": "Local synthetic Waku v12 fixture",
+    "large_session": "Generated-image conversation with 16 MiB synthetic padding to simulate large history",
+    "first_rejected_save_bytes": 16778357,
+    "delete_request_bytes": 206,
+    "passed": [
+      "Oversized save produces a per-session error without submitting it to the socket or repeatedly retrying the same snapshot.",
+      "New chat sends hi, receives the fixture response, and can be deleted on the same connection used before oversize rejection.",
+      "Busy refusal for the image conversation preserves its history and keep-this-draft input.",
+      "Force-stop and restart restore the generated image and draft.",
+      "The final build displays long save errors without collapsing the message counter.",
+      "Explicit ACK deletes the image conversation even though its full-history save is oversized.",
+      "After force-stop and restart, neither the deleted text conversation nor the image conversation returns.",
+      "Request logs show no saveTaskState upload for the large image conversation; removeSession carries the target session ID and NIL runtime.",
+      "Image preview opens and saving produces a byte-identical 10215-byte PNG in Download/deerflow."
+    ],
+    "saved_image_sha256": "b376744416b45ae29b65ffd35cbaea41db5f29e3573bfb751032965a917d334a",
+    "local_evidence": [
+      ".local/connection-requests.jsonl",
+      ".local/connection-diagnostics.log",
+      ".local/connection-image-preview.png",
+      ".local/connection-after-send.png",
+      ".local/connection-delete-refused.png",
+      ".local/connection-restart-history.png",
+      ".local/connection-status-layout-final.png",
+      ".local/connection-after-delete-restart.png"
+    ]
+  },
+  "deployment": {
+    "requires_app_and_daemon_update": true,
+    "backend_patch": "dist/waku-session-deletion-fix.patch",
+    "production_changed": false,
+    "notes": "The phone's actual daemon endpoint was not identified or replaced. The active production daemon was not restarted, and no production sessions were deleted."
+  },
+  "backend_build": {
+    "command": "cargo build -p waku-daemon --bin waku-daemon --release --offline",
+    "result": "success",
+    "errors": 0,
+    "warnings": 14,
+    "artifact": "dist/waku-daemon-session-delete-fix-win64.zip",
+    "artifact_sha256": "85a727f5a544a8f8b9df79b35b90c4d33db0db125d9e04ba8c71cda68777ffa1",
+    "executable_sha256": "8e541fddbe1e0cfe27b5b0a012342fd30a3b5635e46f71ac079d72c279af3639",
+    "platform": "Windows x64"
+  }
+}

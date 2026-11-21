@@ -30,11 +30,17 @@ data class ComposerState(
     val submitting: Set<String> = emptySet(),
 )
 
+data class ThreadDeletionState(val threadId: String, val profileKey: String, val error: String? = null) {
+    val inProgress: Boolean get() = error == null
+}
+
 class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = ConversationRepository.get(app)
     private val draftStore = ComposerDraftStore(File(app.filesDir, "composer_drafts"))
     private val mutableComposer = MutableStateFlow(ComposerState())
     val composer = mutableComposer.asStateFlow()
+    private val mutableDeletion = MutableStateFlow<ThreadDeletionState?>(null)
+    val deletion = mutableDeletion.asStateFlow()
     private val loading = mutableSetOf<String>()
     private val saves = mutableMapOf<String, Job>()
     private val revisions = mutableMapOf<String, Long>()
@@ -204,8 +210,25 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     fun deleteThread(id: String) {
-        clearDraft(profileKey.value + "|" + id)
-        repo.deleteThread(id)
+        if (mutableDeletion.value?.inProgress == true) return
+        val targetProfile = profileKey.value
+        val pending = ThreadDeletionState(id, targetProfile)
+        mutableDeletion.value = pending
+        viewModelScope.launch {
+            try {
+                repo.deleteThread(id, targetProfile)
+                clearDraft(targetProfile + "|" + id)
+                mutableDeletion.value = null
+            } catch (cancelled: CancellationException) {
+                mutableDeletion.value = pending.copy(error = "连接已改变，删除结果尚未确认，请重新同步后核对")
+                throw cancelled
+            } catch (error: Exception) {
+                mutableDeletion.value = pending.copy(error = error.message ?: "删除失败，请重新同步后重试")
+            }
+        }
+    }
+    fun dismissDeletion() {
+        if (mutableDeletion.value?.inProgress != true) mutableDeletion.value = null
     }
     fun refresh() = repo.refresh()
     fun setForeground(value: Boolean) { if (!value) flushDrafts(); repo.setForeground(value) }
