@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.datastore.core.DataMigration
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -68,6 +69,7 @@ class SettingsStore(private val context: Context) {
     private val workspaceKey = stringPreferencesKey("waku_workspace")
     private val modelKey = stringPreferencesKey("waku_model")
     private val configuredKey = stringPreferencesKey("waku_configured")
+    private val backgroundKeepAliveKey = booleanPreferencesKey("waku_background_keep_alive")
     private val oldTokenKey = stringPreferencesKey("token")
     private val oldHeadersKey = stringPreferencesKey("headers")
     private val oldStateKey = stringPreferencesKey("initial_state")
@@ -87,6 +89,15 @@ class SettingsStore(private val context: Context) {
     }.distinctUntilChanged()
 
     suspend fun current(): AppSettings = flow.first()
+
+    /** Separate flow: toggling background keep-alive must not restart a live Waku connection. */
+    val backgroundKeepAliveFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[backgroundKeepAliveKey] ?: false
+    }.distinctUntilChanged()
+
+    suspend fun setKeepBackgroundConnection(enabled: Boolean) {
+        context.dataStore.edit { it[backgroundKeepAliveKey] = enabled }
+    }
 
     /** Separate flow: editing OSS credentials must not restart a Waku connection. */
     val ossFlow: Flow<S3Settings> = context.dataStore.data.map { prefs ->

@@ -50,7 +50,7 @@ class BackgroundConnectionPolicyTest {
         } finally { owner.cancel() }
     }
 
-    @Test fun activeServiceOutlivesGraceAndCompletionReleasesConnection() = runTest {
+    @Test fun activeServiceOutlivesGraceAndCompletionGrantsTailGraceBeforeRelease() = runTest {
         val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
         try {
             val policy = BackgroundConnectionPolicy(owner, 30)
@@ -61,6 +61,46 @@ class BackgroundConnectionPolicyTest {
             assertFalse(policy.state.value.graceActive)
             assertTrue(policy.state.value.keepConnected)
             policy.serviceStopped()
+            assertTrue(policy.state.value.graceActive)
+            assertTrue(policy.state.value.keepConnected)
+            advanceTimeBy(29); runCurrent()
+            assertTrue(policy.state.value.keepConnected)
+            advanceTimeBy(1); runCurrent()
+            assertFalse(policy.state.value.graceActive)
+            assertFalse(policy.state.value.keepConnected)
+        } finally { owner.cancel() }
+    }
+
+    @Test fun returningToForegroundDuringPostServiceGraceDoesNotDisconnect() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        try {
+            val policy = BackgroundConnectionPolicy(owner, 100)
+            val transitions = mutableListOf<Boolean>()
+            val collector = launch(start = CoroutineStart.UNDISPATCHED) { policy.keepConnected.collect { transitions += it } }
+            policy.setVisible(true); yield()
+            policy.serviceStarted(); yield()
+            policy.setVisible(false); yield()
+            advanceTimeBy(200); runCurrent()
+            policy.serviceStopped(); yield()
+            advanceTimeBy(40); runCurrent()
+            policy.setVisible(true); yield()
+            advanceTimeBy(200); runCurrent()
+            assertEquals(listOf(false, true), transitions)
+            assertFalse(policy.state.value.graceActive)
+            collector.cancelAndJoin()
+        } finally { owner.cancel() }
+    }
+
+    @Test fun unstartedServiceStopDoesNotGrantSpuriousGrace() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
+        try {
+            val policy = BackgroundConnectionPolicy(owner, 30)
+            policy.setVisible(true)
+            policy.setVisible(false)
+            advanceTimeBy(40); runCurrent()
+            assertFalse(policy.state.value.keepConnected)
+            policy.serviceStopped()
+            assertFalse(policy.state.value.graceActive)
             assertFalse(policy.state.value.keepConnected)
         } finally { owner.cancel() }
     }

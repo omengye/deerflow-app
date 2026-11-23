@@ -12,6 +12,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /** Owns only a foreground subscription lease. The server owns execution. */
@@ -22,13 +23,21 @@ class BackgroundConnectionService : Service() {
     private var stopping = false
     private var promoted = false
 
+    private data class ServiceNoticeState(
+        val work: BackgroundWork,
+        val connected: Boolean,
+        val keepAlive: Boolean,
+        val paused: Boolean,
+    )
+
     override fun onCreate() {
         super.onCreate()
         repo = ConversationRepository.get(applicationContext)
         notifications = TaskNotifications(this)
         try {
             ServiceCompat.startForeground(this, TaskNotifications.PROGRESS_ID,
-                notifications.progress(BackgroundWork(), false), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                notifications.progress(BackgroundWork(), false, repo.backgroundKeepAlive.value),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             promoted = true
             repo.backgroundServiceStarted()
         } catch (_: RuntimeException) {
@@ -37,13 +46,18 @@ class BackgroundConnectionService : Service() {
             return
         }
         scope.launch {
-            combine(repo.backgroundWork, repo.isConnected) { work, connected -> work to connected }
-                .distinctUntilChanged().collect { (work, connected) ->
-                    if (!stopping) {
-                        if (!work.hasWork || repo.backgroundConnection.value.pauseReason != null) finish()
-                        else notifications.updateProgress(notifications.progress(work, connected))
-                    }
+            combine(
+                repo.backgroundWork,
+                repo.isConnected,
+                repo.backgroundKeepAlive,
+                repo.backgroundConnection.map { it.pauseReason != null }.distinctUntilChanged(),
+                ::ServiceNoticeState,
+            ).distinctUntilChanged().collect { (work, connected, keepAlive, paused) ->
+                if (!stopping) {
+                    if ((!work.hasWork && !keepAlive) || paused) finish()
+                    else notifications.updateProgress(notifications.progress(work, connected, keepAlive))
                 }
+            }
         }
     }
 

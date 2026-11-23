@@ -40,12 +40,21 @@ class ConversationRepository(
     private val network = NetworkMonitor(appContext)
     private val retention = BackgroundConnectionPolicy(scope)
     // elapsedRealtime includes deep sleep, so a socket from before Doze is not treated as fresh.
-    private val connectionSupervisor = WakuConnectionSupervisor(clockMillis = android.os.SystemClock::elapsedRealtime)
+    private val connectionSupervisor = WakuConnectionSupervisor(
+        clockMillis = android.os.SystemClock::elapsedRealtime,
+        probeTimeoutMillis = 5_000,
+    )
     private val serviceRequested = AtomicBoolean(false)
     private val outgoingOperations = MutableStateFlow(0)
     private val backgroundSummary = MutableStateFlow(BackgroundWork())
+    private val isConfigured = MutableStateFlow(false)
     private val taskNotifications by lazy { TaskNotifications(appContext) }
     val backgroundConnection = retention.state
+    val keepBackgroundConnection: StateFlow<Boolean> = settings.backgroundKeepAliveFlow
+        .stateIn(scope, SharingStarted.Eagerly, false)
+    val backgroundKeepAlive: StateFlow<Boolean> = combine(keepBackgroundConnection, isConfigured) { keep, configured ->
+        keep && configured
+    }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, false)
     val backgroundWork = combine(backgroundSummary, outgoingOperations) { work, count -> work.copy(transmitting = count) }
     private val refreshSignal = MutableStateFlow(0L)
     private val forceHydration = AtomicBoolean(false)
@@ -111,6 +120,13 @@ class ConversationRepository(
         val checkpoint = Channel<Unit>(Channel.CONFLATED)
         val titleRefresh = Channel<Unit>(Channel.CONFLATED)
         val catalogChanges = Channel<Unit>(Channel.CONFLATED)
+        val sessionSyncQueue = Channel<WakuCatalogSync.SyncTarget>(Channel.UNLIMITED)
+        val previousCatalog = mutableMapOf<String, JsonObject>()
+        var catalogInitialized = false
+        val catalogSynced = mutableMapOf<String, WakuCatalogSync.Fingerprint>()
+        val requestedRuntimes = mutableSetOf<Pair<String, String>>()
+        val ignoredSessionIds = mutableSetOf<String>()
+        val unknownEventSessions = mutableSetOf<String>()
         val titleChecked = mutableMapOf<String, JsonObject>()
         val catalogRefresh = Mutex()
         val persistence = Mutex()
@@ -133,6 +149,7 @@ class ConversationRepository(
             legacyIndex = readLegacyIndex()
             connectionRequests(settings.flow, retention.keepConnected, network.state, refreshSignal).collectLatest { request ->
                 val (cfg, keepConnected, networkState) = request
+                isConfigured.value = cfg.isConfigured
                 try {
                     val current = activateProfile(cfg)
                     if (!cfg.isConfigured) {
@@ -149,8 +166,10 @@ class ConversationRepository(
             }
         }
         scope.launch(Dispatchers.Main.immediate) {
-            combine(backgroundWork, retention.state) { work, state -> work to state }.collect { (work, state) ->
-                if (work.hasWork && state.visible && state.pauseReason == null && !state.serviceActive) {
+            combine(backgroundWork, retention.state, backgroundKeepAlive) { work, state, keepAlive ->
+                Triple(work, state, keepAlive)
+            }.collect { (work, state, keepAlive) ->
+                if ((work.hasWork || keepAlive) && state.visible && state.pauseReason == null && !state.serviceActive) {
                     ensureBackgroundService()
                 }
             }
@@ -165,7 +184,7 @@ class ConversationRepository(
     fun setForeground(value: Boolean) {
         val returning = value && !retention.state.value.visible
         retention.setVisible(value)
-        if (value && (backgroundSummary.value.hasWork || outgoingOperations.value > 0)) ensureBackgroundService()
+        if (value && (backgroundSummary.value.hasWork || outgoingOperations.value > 0 || backgroundKeepAlive.value)) ensureBackgroundService()
         if (returning) connectionSupervisor.foreground()
     }
 
@@ -275,6 +294,7 @@ class ConversationRepository(
                             probe = { timeout ->
                                 val response = link.client.request(wakuCommand("getSettings"), timeoutMs = timeout)
                                 require(response.s("type") == "settings")
+                                link.catalogChanges.trySend(Unit)
                             },
                             reconnect = {
                                 if (active === link && retention.state.value.visible) {
@@ -345,25 +365,90 @@ class ConversationRepository(
                 catch (_: Exception) { /* Optional metadata can retry on the next catalog refresh. */ }
             }
         }
+        val sessionSyncer = launch {
+            val syncLock = Mutex()
+            val activeJobs = mutableMapOf<String, Job>()
+            val pendingTargets = mutableMapOf<String, WakuCatalogSync.SyncTarget>()
+            fun mergePending(existing: WakuCatalogSync.SyncTarget?, incoming: WakuCatalogSync.SyncTarget): WakuCatalogSync.SyncTarget {
+                if (existing == null) return incoming
+                return WakuCatalogSync.SyncTarget(
+                    sessionId = incoming.sessionId,
+                    forceHydrate = existing.forceHydrate || incoming.forceHydrate,
+                    expectedRuntimeId = incoming.expectedRuntimeId ?: existing.expectedRuntimeId,
+                )
+            }
+            for (target in link.sessionSyncQueue) {
+                val id = target.sessionId
+                syncLock.withLock {
+                    if (activeJobs[id]?.isActive == true) {
+                        pendingTargets[id] = mergePending(pendingTargets[id], target)
+                        return@withLock
+                    }
+                    activeJobs[id] = launch {
+                        var current: WakuCatalogSync.SyncTarget? = target
+                        try {
+                            while (current != null) {
+                                val runTarget = current
+                                try {
+                                    hydrateAttach(link, id, forceHydrate = runTarget.forceHydrate)
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (error: Exception) {
+                                    mutex.withLock {
+                                        ensureCurrent(link)
+                                        link.requestedRuntimes.removeAll { it.first == id }
+                                        link.catalogSynced.remove(id)
+                                        if ((id in link.profile.remoteIds || id in link.profile.snapshots) &&
+                                            (id !in link.profile.ready || id in link.profile.syncing)) {
+                                            link.profile.syncErrors[id] = "同步未完成：${error.message ?: "请重新同步"}"
+                                            publish(link.profile)
+                                        }
+                                    }
+                                    break
+                                }
+                                val (needsRefresh, currentLiveRuntimeId) = mutex.withLock {
+                                    ensureCurrent(link)
+                                    val refresh = WakuRecovery.needsHistoryRefresh(
+                                        link.profile.snapshots[id]?.session,
+                                        link.profile.catalog[id],
+                                    )
+                                    val liveId = liveRuntime(link, id)?.takeIf { !it.catchingUp }?.id
+                                    refresh to liveId
+                                }
+                                current = syncLock.withLock {
+                                    val queued = pendingTargets.remove(id)
+                                    val next = when {
+                                        needsRefresh -> WakuCatalogSync.SyncTarget(id, forceHydrate = true)
+                                        queued == null -> null
+                                        !queued.forceHydrate && queued.expectedRuntimeId != null &&
+                                            queued.expectedRuntimeId == currentLiveRuntimeId -> null
+                                        else -> queued
+                                    }
+                                    if (next == null && activeJobs[id] === coroutineContext[Job]) {
+                                        activeJobs.remove(id)
+                                    }
+                                    next
+                                }
+                            }
+                        } finally {
+                            withContext(NonCancellable) {
+                                syncLock.withLock {
+                                    if (activeJobs[id] === coroutineContext[Job]) {
+                                        activeJobs.remove(id)
+                                        pendingTargets.remove(id)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         val catalogReader = launch {
             for (signal in link.catalogChanges) {
                 try {
-                    for (id in loadCatalog(link)) {
-                        try {
-                            // Join an in-flight recovery first, then check whether its snapshot
-                            // predates the history change that invalidated this subscription.
-                            do {
-                                hydrateAttach(link, id, forceHydrate = true)
-                            } while (mutex.withLock {
-                                ensureCurrent(link)
-                                WakuRecovery.needsHistoryRefresh(link.profile.snapshots[id]?.session, link.profile.catalog[id])
-                            })
-                        } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (error: Exception) { mutex.withLock {
-                            ensureCurrent(link)
-                            link.profile.syncErrors[id] = "历史同步未完成：${error.message ?: "请重新同步"}"
-                            publish(link.profile)
-                        } }
+                    for (target in loadCatalog(link)) {
+                        enqueueSessionSync(link, target)
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) { /* The next catalog notification or refresh retries this read. */ }
@@ -385,7 +470,9 @@ class ConversationRepository(
             val toRestore = mutex.withLock {
                 ensureCurrent(link)
                 val p = link.profile
-                (listOf(p.selected) + p.catalog.filterValues { it.s("status") in BUSY }.keys).distinct().filterNot { it.startsWith("legacy:") }
+                val ids = (listOf(p.selected) + p.catalog.filterValues { it.s("status") in BUSY }.keys).distinct().filterNot { it.startsWith("legacy:") }
+                for (id in ids) p.catalog[id]?.let { link.catalogSynced[id] = WakuCatalogSync.fingerprint(it) }
+                ids
             }
             // Each session unlocks independently. Failure in another task cannot block this chat.
             for (id in toRestore) recoveryJobs += launch {
@@ -410,22 +497,42 @@ class ConversationRepository(
             link.ended.await()
         } finally {
             recoveryJobs.forEach { it.cancel() }
-            receive.cancel(); watch.cancel(); localWriter.cancel(); serverWriter.cancel(); titleReader.cancel(); catalogReader.cancel()
+            receive.cancel(); watch.cancel(); localWriter.cancel(); serverWriter.cancel(); titleReader.cancel(); catalogReader.cancel(); sessionSyncer.cancel()
         }
     }
 
-    private suspend fun loadCatalog(link: Link) = link.catalogRefresh.withLock {
+    private fun enqueueSessionSync(link: Link, target: WakuCatalogSync.SyncTarget) {
+        if (!target.sessionId.startsWith("legacy:")) link.sessionSyncQueue.trySend(target)
+    }
+
+    private suspend fun loadCatalog(link: Link): List<WakuCatalogSync.SyncTarget> = link.catalogRefresh.withLock {
         val result = link.client.request(wakuCommand("loadTaskState"))
         require(result.s("type") == "taskState") { "服务器返回的会话列表无效" }
-        val changedHistory = mutex.withLock {
+        val targets = mutex.withLock {
             ensureCurrent(link)
             val p = link.profile
             p.projects.putAll(result.objs("projects").associateBy { it.s("id").orEmpty() })
             p.catalog.clear()
-            p.catalog.putAll(result.objs("sessions").filter { it.s("provider") == "deerFlow" }.associateBy { it.s("id").orEmpty() })
+            link.ignoredSessionIds.clear()
+            for (session in result.objs("sessions")) {
+                val sessionId = session.s("id").orEmpty()
+                if (sessionId.isBlank()) continue
+                if (session.s("provider") == "deerFlow") p.catalog[sessionId] = session
+                else link.ignoredSessionIds += sessionId
+            }
             p.remoteIds.clear(); p.remoteIds += p.catalog.keys
+            link.unknownEventSessions.removeAll(p.remoteIds)
+            link.unknownEventSessions.removeAll(link.ignoredSessionIds)
+            val syncTargets = WakuCatalogSync.sessionsToSync(
+                selectedId = p.selected,
+                previousCatalog = link.previousCatalog,
+                currentCatalog = p.catalog,
+                snapshots = p.snapshots,
+                attachedSessionIds = link.runtimes.filter { (id, rt) -> !link.artifacts.hasExited(id, rt.id) }.keys,
+                syncedFingerprints = link.catalogSynced,
+                isLiveUpdate = link.catalogInitialized,
+            )
             // Only copy title metadata: catalog rows deliberately contain empty transcripts/cursors.
-            val changed = mutableListOf<String>()
             for ((id, summary) in p.catalog) {
                 val snapshot = p.snapshots[id] ?: continue
                 if (WakuRecovery.needsHistoryRefresh(snapshot.session, summary)) {
@@ -433,7 +540,6 @@ class ConversationRepository(
                     p.syncErrors[id] = "会话历史已更新，正在重新同步…"
                     link.artifactJobs[id]?.cancel()
                     p.artifacts.remove(id); p.artifactErrors.remove(id)
-                    if (id == p.selected || id in link.runtimes) changed += id
                     continue
                 }
                 var merged = WakuSessionTitles.mergeMetadata(snapshot.session, summary)
@@ -444,6 +550,12 @@ class ConversationRepository(
                 }
                 if (merged != snapshot.session) putSnapshot(p, id, snapshot.copy(session = merged), false)
             }
+            for (target in syncTargets) {
+                p.catalog[target.sessionId]?.let { link.catalogSynced[target.sessionId] = WakuCatalogSync.fingerprint(it) }
+            }
+            link.previousCatalog.clear()
+            link.previousCatalog.putAll(p.catalog)
+            link.catalogInitialized = true
             for (id in p.remoteIds) p.drafts.remove(id)
             for (id in p.snapshots.keys - p.remoteIds) {
                 val snapshot = p.snapshots[id] ?: continue
@@ -454,10 +566,10 @@ class ConversationRepository(
                 else p.blocked[id] = "本地历史尚未在服务器中找到对应会话，请核对服务器配置。"
             }
             publish(p)
-            changed
+            syncTargets
         }
         link.titleRefresh.trySend(Unit)
-        changedHistory
+        targets
     }
 
     /** Read missing title history without attaching a runtime or submitting provider work. */
@@ -553,6 +665,7 @@ class ConversationRepository(
                     putSnapshot(p, id, WakuProjection.bindRuntime(p.snapshots.getValue(id), runtimeId), serverDirty = false)
                     val existing = link.runtimes[id]?.takeIf { it.id == runtimeId }
                     link.runtimes[id] = existing?.apply { catchingUp = true } ?: Runtime(runtimeId)
+                    link.requestedRuntimes += id to runtimeId
                 }
                 try { catchUp(link, id, runtimeId) }
                 catch (changed: ReplayEpochChanged) {
@@ -567,6 +680,7 @@ class ConversationRepository(
                             buffered.clear()
                             bytes = 0
                         } ?: Runtime(runtimeId)
+                        link.requestedRuntimes += id to runtimeId
                     }
                     catchUp(link, id, runtimeId)
                 }
@@ -589,9 +703,11 @@ class ConversationRepository(
                 mutex.withLock { if (active === link) {
                     link.profile.syncing -= id; link.profile.syncStatus.remove(id); publish(link.profile)
                     if (id in link.profile.ready && link.profile.snapshots[id]?.session?.s("status") !in BUSY) {
-                        link.runtimes[id]?.let { scheduleArtifacts(link, id, it.id) }
+                        liveRuntime(link, id)?.let { scheduleArtifacts(link, id, it.id) }
                     } else if (id !in link.profile.ready) {
                         link.runtimes.remove(id)
+                        link.requestedRuntimes.removeAll { it.first == id }
+                        link.catalogSynced.remove(id)
                     }
                 } }
             }
@@ -604,6 +720,7 @@ class ConversationRepository(
         mutex.withLock {
             ensureCurrent(link)
             val p = link.profile
+            require(id in p.remoteIds) { "服务器会话已不存在" }
             val previous = p.snapshots[id]
             val dirtyTitle = previous?.takeIf { id in p.serverDirty && !WakuRecovery.needsHistoryRefresh(it.session, remote) }
                 ?.session?.get("title")?.takeIf { it is JsonPrimitive && it.content.isNotBlank() }
@@ -747,11 +864,27 @@ class ConversationRepository(
     private suspend fun receiveEvent(link: Link, wire: JsonObject) {
         link.artifacts.onWireEvent(wire)
         link.toolApproval.onWireEvent(wire)
-        mutex.withLock {
+        val (syncTarget, refreshCatalog) = mutex.withLock {
             ensureCurrent(link)
             val id = wire.s("sessionId") ?: return
-            val runtime = link.runtimes[id] ?: return
-            if (runtime.id != wire.s("runtimeId") || wire["replayable"] == JsonPrimitive(false)) return
+            if (wire["replayable"] == JsonPrimitive(false)) return
+            val incomingRuntimeId = wire.s("runtimeId") ?: return
+            val runtime = link.runtimes[id]
+            if (runtime == null || runtime.id != incomingRuntimeId) {
+                if (id.startsWith("legacy:") || id in link.ignoredSessionIds) return
+                if (id !in link.profile.remoteIds) {
+                    val shouldRefresh = link.unknownEventSessions.size < 512 && link.unknownEventSessions.add(id)
+                    return@withLock null to shouldRefresh
+                }
+                if (link.requestedRuntimes.add(id to incomingRuntimeId)) {
+                    return@withLock WakuCatalogSync.SyncTarget(
+                        sessionId = id,
+                        forceHydrate = false,
+                        expectedRuntimeId = incomingRuntimeId,
+                    ) to false
+                }
+                return
+            }
             if (runtime.catchingUp) {
                 runtime.bytes += wire.toString().length * 2
                 if (runtime.buffered.size >= 2_048 || runtime.bytes > 8 * 1024 * 1024) throw IOException("同步期间事件缓冲区已满，重新连接补齐")
@@ -761,7 +894,10 @@ class ConversationRepository(
                 applyEvent(link, wire)
                 publish(link.profile)
             }
+            null to false
         }
+        if (refreshCatalog) link.catalogChanges.trySend(Unit)
+        if (syncTarget != null) enqueueSessionSync(link, syncTarget)
     }
 
     private fun applyEvent(link: Link, wire: JsonObject) {
@@ -1008,13 +1144,21 @@ class ConversationRepository(
     }
 
     fun selectThread(id: String) = scope.launch {
-        val link = mutex.withLock {
+        val (link, alreadySynced) = mutex.withLock {
             val p = profile ?: return@launch
             active?.takeIf { it.profile === p }?.artifactJobs?.filterKeys { it != id }?.values?.forEach { it.cancel() }
             p.selected = id; publish(p)
-            active?.takeIf { it.profile === p }
+            val currentLink = active?.takeIf { it.profile === p }
+            val liveRuntime = currentLink?.let { liveRuntime(it, id) }?.takeIf { !it.catchingUp }
+            val readyAndFresh = currentLink != null && liveRuntime != null &&
+                id in p.ready && id !in p.syncing &&
+                !WakuRecovery.needsHistoryRefresh(p.snapshots[id]?.session, p.catalog[id])
+            if (readyAndFresh && p.snapshots[id]?.session?.s("status") !in BUSY) {
+                scheduleArtifacts(currentLink, id, liveRuntime.id)
+            }
+            currentLink to readyAndFresh
         }
-        if (!id.startsWith("legacy:") && link != null) operations.withLock {
+        if (!id.startsWith("legacy:") && link != null && !alreadySynced) operations.withLock {
             try { hydrateAttach(link, id) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { mutex.withLock {
@@ -1127,6 +1271,7 @@ class ConversationRepository(
                         snapshot = WakuProjection.bindRuntime(link.profile.snapshots.getValue(id), runtime)
                         putSnapshot(link.profile, id, snapshot, false)
                         link.runtimes[id] = Runtime(runtime)
+                        link.requestedRuntimes += id to runtime
                         flushLocal(link.profile)
                     }
                     val cwd = mutex.withLock { cwd(link.profile, snapshot.session) }
@@ -1146,8 +1291,10 @@ class ConversationRepository(
                     createdRuntime = true
                 } else mutex.withLock {
                     ensureCurrent(link)
-                    putSnapshot(link.profile, id, WakuProjection.bindRuntime(link.profile.snapshots.getValue(id), requireNotNull(runtimeId)), false)
-                    link.runtimes[id] = Runtime(requireNotNull(runtimeId))
+                    val attachedRuntime = requireNotNull(runtimeId)
+                    putSnapshot(link.profile, id, WakuProjection.bindRuntime(link.profile.snapshots.getValue(id), attachedRuntime), false)
+                    link.runtimes[id] = Runtime(attachedRuntime)
+                    link.requestedRuntimes += id to attachedRuntime
                 }
                 catchUp(link, id, requireNotNull(runtimeId))
             }
@@ -1354,6 +1501,9 @@ class ConversationRepository(
                 p.localDirty -= id; p.serverDirty -= id; p.ready -= id; p.syncing -= id
                 p.blocked.remove(id); p.artifacts.remove(id); p.artifactErrors.remove(id)
                 p.syncErrors.remove(id); p.syncStatus.remove(id); link.runtimes.remove(id)
+                link.previousCatalog.remove(id); link.catalogSynced.remove(id)
+                link.requestedRuntimes.removeAll { it.first == id }
+                link.ignoredSessionIds.remove(id); link.unknownEventSessions.remove(id)
                 p.saveErrors.remove(id); link.checkpoints.forget(id)
                 if (p.selected == id) { p.selected = UUID.randomUUID().toString(); createDraft(p, p.selected); p.ready += p.selected }
                 publish(p)
@@ -1549,6 +1699,8 @@ class ConversationRepository(
     private fun flushLocal(p: Profile) {
         for (id in p.localDirty.toList()) { p.snapshots[id]?.let(p.store::save); p.localDirty -= id }
     }
+    private fun liveRuntime(link: Link, id: String): Runtime? =
+        link.runtimes[id]?.takeIf { !link.artifacts.hasExited(id, it.id) }
     private fun ensureCurrent(link: Link) {
         if (active !== link || profile !== link.profile) throw CancellationException("Connection was superseded")
     }
@@ -1565,8 +1717,17 @@ class ConversationRepository(
 
     private fun publish(p: Profile) {
         if (profile !== p) return
-        _isConnected.value = active?.takeIf { it.profile === p }?.client?.state?.value == WakuConnectionState.Connected
-        val rows = p.catalog.toMutableMap().apply { p.snapshots.forEach { (id, snapshot) -> put(id, snapshot.session) } }
+        val liveLink = active?.takeIf { it.profile === p && it.client.state.value == WakuConnectionState.Connected }
+        _isConnected.value = liveLink != null
+        val allIds = p.catalog.keys + p.snapshots.keys
+        val rows = buildMap<String, JsonObject> {
+            for (id in allIds) {
+                val snapshot = p.snapshots[id]
+                val catalogRow = if (snapshot == null || liveLink != null) p.catalog[id] else null
+                val liveAttached = liveLink?.let { liveRuntime(it, id) }?.catchingUp == false
+                WakuCatalogSync.mergeDisplayRow(catalogRow, snapshot, liveAttached)?.let { put(id, it) }
+            }
+        }
         _threads.value = rows.values.filter { it.s("provider") == "deerFlow" }.mapNotNull { session ->
             val id = session.s("id") ?: return@mapNotNull null
             ThreadMeta(id, WakuSessionTitles.display(session), session.n("updated_at") * 1000, true)

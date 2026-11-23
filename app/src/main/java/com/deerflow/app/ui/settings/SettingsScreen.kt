@@ -9,6 +9,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -23,6 +24,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.*
@@ -31,6 +33,7 @@ import com.deerflow.app.ui.memory.MemoryScreen
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -83,23 +86,65 @@ fun SettingsScreen(onBack: () -> Unit, vm: SettingsViewModel = viewModel()) {
             TextButton(onClick = { memoryVisible = true }, enabled = enabled) { Text("个人记忆") }
             TextButton(onClick = { ossVisible = true }, enabled = enabled) { Text("OSS 附件存储") }
             Text("后台连接", style = MaterialTheme.typography.titleSmall)
-            Text("任务执行时持续接收进度与待处理提醒；空闲时切到后台 60 秒后暂停。可在通知栏暂停后台接收。",
-                style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = {
-                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                try {
-                    context.startActivity(intent)
-                } catch (_: Exception) {
-                    try {
-                        context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                            data = Uri.fromParts("package", context.packageName, null)
-                        })
-                    } catch (_: Exception) {
-                        Toast.makeText(context, "无法打开系统设置", Toast.LENGTH_SHORT).show()
-                    }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("后台持续同步会话", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (state.keepBackgroundConnection) {
+                            "已开启：切后台后保持前台服务与长连接，静默接收当前及多端会话更新。可在通知栏随时暂停。"
+                        } else {
+                            "已关闭（默认）：任务执行时保持后台连接，任务完成后保留 60 秒宽限；空闲切后台 60 秒后暂停。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-            }) { Text("通知设置") }
+                Switch(
+                    checked = state.keepBackgroundConnection,
+                    onCheckedChange = vm::keepBackgroundConnectionChanged,
+                    enabled = enabled,
+                )
+            }
+            Text(
+                "国产系统若限制后台联网或冻结进程，请在电池设置中将本应用设为“无限制”并锁定后台。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = {
+                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    try {
+                        context.startActivity(intent)
+                    } catch (_: Exception) {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", context.packageName, null)
+                            })
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "无法打开系统设置", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }) { Text("通知设置") }
+                TextButton(onClick = {
+                    val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                    try {
+                        context.startActivity(intent)
+                    } catch (_: Exception) {
+                        try {
+                            context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", context.packageName, null)
+                            })
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "无法打开电池设置", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }) { Text("电池优化设置") }
+            }
             Text("工具权限：Full Access", style = MaterialTheme.typography.titleSmall)
             Text("普通工具自动授权。已有会话在发送下一条消息前应用；服务器要求的特殊审批仍会显示。",
                 style = MaterialTheme.typography.bodySmall)

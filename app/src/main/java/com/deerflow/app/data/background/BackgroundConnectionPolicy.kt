@@ -54,7 +54,21 @@ class BackgroundConnectionPolicy(
     }
 
     fun serviceStopped() = synchronized(lock) {
-        mutableState.value = mutableState.value.copy(serviceActive = false)
+        val old = mutableState.value
+        if (!old.serviceActive) return@synchronized
+        if (!old.visible && old.pauseReason == null) {
+            val ticket = ++generation
+            graceJob?.cancel()
+            mutableState.value = old.copy(serviceActive = false, graceActive = true)
+            graceJob = scope.launch {
+                delay(idleGraceMillis)
+                synchronized(lock) {
+                    if (generation == ticket) mutableState.value = mutableState.value.copy(graceActive = false)
+                }
+            }
+        } else {
+            mutableState.value = old.copy(serviceActive = false)
+        }
     }
 
     /** Pause only the subscription; execution/cancel commands are deliberately outside this policy. */

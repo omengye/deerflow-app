@@ -37,13 +37,19 @@ class TaskNotifications(private val context: Context) {
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         .setShowWhen(false)
 
-    fun progress(work: BackgroundWork, connected: Boolean): Notification {
+    fun progress(work: BackgroundWork, connected: Boolean, keepAlive: Boolean = false): Notification {
         val pause = PendingIntent.getService(context, 1,
             Intent(context, BackgroundConnectionService::class.java).setAction(BackgroundConnectionService.ACTION_PAUSE),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val contentText = when {
+            !connected -> if (work.hasWork) "连接正在恢复，服务器任务继续执行" else "连接正在恢复，稍后继续后台同步"
+            work.hasWork -> work.progressText
+            keepAlive -> "已开启后台保活，正在静默同步会话消息"
+            else -> work.progressText
+        }
         return builder(PROGRESS_CHANNEL)
             .setContentTitle("DeerFlow · 后台接收中")
-            .setContentText(if (connected) work.progressText else "连接正在恢复，服务器任务继续执行")
+            .setContentText(contentText)
             .setSubText("暂停接收不会停止服务器任务")
             .setOngoing(true)
             .setOnlyAlertOnce(true)

@@ -8,11 +8,13 @@ import com.deerflow.app.data.settings.SettingsStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class SettingsUiState(
     val draft: AppSettings = AppSettings(),
+    val keepBackgroundConnection: Boolean = false,
     val loaded: Boolean = false,
     val saving: Boolean = false,
     val saveError: String? = null,
@@ -33,6 +35,11 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { mutableState.update { it.copy(saveError = "无法读取设置，请返回后重试") } }
         }
+        viewModelScope.launch {
+            store.backgroundKeepAliveFlow.collect { enabled ->
+                mutableState.update { it.copy(keepBackgroundConnection = enabled) }
+            }
+        }
     }
     private fun edit(transform: AppSettings.() -> AppSettings) {
         if (!state.value.saving) mutableState.update { it.copy(draft = it.draft.transform(), saveError = null) }
@@ -41,6 +48,18 @@ class SettingsViewModel(app: Application) : AndroidViewModel(app) {
     fun tokenChanged(value: String) = edit { copy(token = value) }
     fun workspaceChanged(value: String) = edit { copy(workspace = value) }
     fun selectModel(value: String?) = edit { copy(modelName = value?.takeIf(String::isNotBlank)) }
+    fun keepBackgroundConnectionChanged(enabled: Boolean) {
+        mutableState.update { it.copy(keepBackgroundConnection = enabled, saveError = null) }
+        viewModelScope.launch {
+            try {
+                store.setKeepBackgroundConnection(enabled)
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) {
+                val persisted = runCatching { store.backgroundKeepAliveFlow.first() }.getOrDefault(!enabled)
+                mutableState.update { it.copy(keepBackgroundConnection = persisted, saveError = "无法保存后台连接设置，请重试") }
+            }
+        }
+    }
     fun save() {
         if (!state.value.canSave) return
         val draft = state.value.draft
