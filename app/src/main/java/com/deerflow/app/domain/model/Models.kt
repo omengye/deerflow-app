@@ -139,7 +139,8 @@ data class ThreadMeta(
     val id: String,
     val title: String,
     val lastActive: Long,
-    val isTitleFetched: Boolean = false
+    val isTitleFetched: Boolean = false,
+    val remoteDeleted: Boolean = false,
 )
 
 @Serializable

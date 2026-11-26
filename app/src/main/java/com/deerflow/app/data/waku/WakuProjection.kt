@@ -20,6 +20,7 @@ data class WakuSnapshot(
     val runtimeId: String? = null,
     val retiredEpochs: List<String> = emptyList(),
     val remoteKnown: Boolean = false,
+    val remoteDeleted: Boolean = false,
     val interactionsVerified: Boolean = false,
     val interactionReplay: WakuControlCheckpoint? = null,
     val artifactReplay: WakuControlCheckpoint? = null,
@@ -204,6 +205,9 @@ object WakuProjection {
                                     isError = activity.flag("failed") == true,
                                     isRunning = activity.flag("complete") == false && activity.flag("failed") != true &&
                                         session.text("status") in setOf("connecting", "working", "waiting", "background"),
+                                    taskTitle = WakuToolPresentation.taskTitle(activity),
+                                    agentName = WakuToolPresentation.agentName(activity),
+                                    kind = activity.text("kind"),
                                 ), turnIndex = turnIndex)
                         }
                     }

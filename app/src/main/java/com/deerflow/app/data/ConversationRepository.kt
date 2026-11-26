@@ -226,8 +226,10 @@ class ConversationRepository(
                 val id = stored.session.s("id") ?: return@forEach
                 p.snapshots[id] = recovered
                 p.artifacts[id] = recovered.artifactFiles
+                if (recovered.remoteDeleted) p.blocked[id] = REMOTE_DELETED_NOTICE
             }
-            p.selected = p.snapshots.values.maxByOrNull { it.session.n("updated_at") }?.session?.s("id") ?: initialId
+            p.selected = WakuDraftPolicy.initialSelectedId(p.snapshots, p.remoteIds, p.blocked.keys, initialId)
+            pruneRedundantEmptyDrafts(p, keepId = p.selected)
             profiles[key] = p
         }
         next.config = cfg
@@ -556,15 +558,27 @@ class ConversationRepository(
             link.previousCatalog.clear()
             link.previousCatalog.putAll(p.catalog)
             link.catalogInitialized = true
-            for (id in p.remoteIds) p.drafts.remove(id)
+            for (id in p.remoteIds) {
+                p.drafts.remove(id)
+                val existing = p.snapshots[id]
+                if (existing?.remoteDeleted == true) {
+                    putSnapshot(p, id, existing.copy(remoteDeleted = false), false)
+                }
+                if (p.blocked[id] == REMOTE_DELETED_NOTICE) p.blocked.remove(id)
+            }
             for (id in p.snapshots.keys - p.remoteIds) {
                 val snapshot = p.snapshots[id] ?: continue
                 if (snapshot.remoteKnown) {
                     p.drafts -= id
-                    p.blocked[id] = "服务器中已没有此会话，本地历史只读；请新建会话。"
+                    p.blocked[id] = REMOTE_DELETED_NOTICE
+                    link.runtimes.remove(id)
+                    link.artifactJobs.remove(id)?.cancel()
+                    if (!snapshot.remoteDeleted) putSnapshot(p, id, snapshot.copy(remoteDeleted = true), false)
                 } else if (snapshot.session.objs("messages").isEmpty() && snapshot.cursor == null) p.drafts += id
                 else p.blocked[id] = "本地历史尚未在服务器中找到对应会话，请核对服务器配置。"
             }
+            pruneRedundantEmptyDrafts(p, keepId = p.selected)
+            flushLocal(p)
             publish(p)
             syncTargets
         }
@@ -593,7 +607,7 @@ class ConversationRepository(
                     link.titleChecked[id] = summary
                     if (remote?.s("id") == id) {
                         val current = p.snapshots[id]
-                        val next = if (current == null) WakuProjection.fromSession(remote).copy(remoteKnown = true)
+                        val next = if (current == null) WakuProjection.fromSession(remote).copy(remoteKnown = true, remoteDeleted = false)
                         else {
                             var merged = WakuSessionTitles.mergeMetadata(current.session, remote, fullSnapshot = true)
                             if (id in p.serverDirty) {
@@ -734,7 +748,7 @@ class ConversationRepository(
             if (epoch != null && snapshot.replayPosition()?.epoch != epoch) {
                 snapshot = snapshot.copy(cursor = null, session = snapshot.session.patch("runtime_event_cursor" to JsonNull))
             }
-            var resolved = WakuRecovery.resolveObservedCommands(snapshot).copy(remoteKnown = true)
+            var resolved = WakuRecovery.resolveObservedCommands(snapshot).copy(remoteKnown = true, remoteDeleted = false)
             if (dirtyTitle != null) resolved = resolved.copy(session = resolved.session.patch("title" to dirtyTitle))
             putSnapshot(p, id, resolved, dirtyTitle != null)
         }
@@ -1135,9 +1149,9 @@ class ConversationRepository(
     fun newThread() = scope.launch {
         mutex.withLock {
             val p = profile ?: return@withLock
-            val id = UUID.randomUUID().toString()
-            active?.takeIf { it.profile === p }?.artifactJobs?.values?.forEach { it.cancel() }
-            createDraft(p, id); p.selected = id
+            val id = ensureEphemeralDraft(p)
+            active?.takeIf { it.profile === p }?.artifactJobs?.filterKeys { it != id }?.values?.forEach { it.cancel() }
+            p.selected = id
             if (_isConnected.value) p.ready += id
             publish(p)
         }
@@ -1451,18 +1465,50 @@ class ConversationRepository(
                 publish(p)
                 return@withLock
             }
-            putSnapshot(p, p.selected, snapshot.copy(pendingCommands = WakuCommandPolicy.acknowledge(snapshot.pendingCommands)), false)
-            if (_isConnected.value && _connection.value != "已连接") _connection.value = "已连接"
-            flushLocal(p); publish(p)
+            val updated = snapshot.copy(pendingCommands = WakuCommandPolicy.acknowledge(snapshot.pendingCommands))
+            commitAcknowledgedSnapshot(p, p.selected, updated)
+        }
+    }
+
+    private fun removeLocalSessionLocked(p: Profile, link: Link?, id: String) {
+        link?.artifactJobs?.remove(id)?.cancel()
+        p.store.delete(id); p.snapshots.remove(id); p.catalog.remove(id); p.remoteIds -= id; p.drafts -= id
+        p.localDirty -= id; p.serverDirty -= id; p.ready -= id; p.syncing -= id
+        p.blocked.remove(id); p.artifacts.remove(id); p.artifactErrors.remove(id)
+        p.syncErrors.remove(id); p.syncStatus.remove(id)
+        link?.let {
+            it.runtimes.remove(id)
+            it.previousCatalog.remove(id); it.catalogSynced.remove(id)
+            it.requestedRuntimes.removeAll { pair -> pair.first == id }
+            it.ignoredSessionIds.remove(id); it.unknownEventSessions.remove(id)
+            it.checkpoints.forget(id)
+        }
+        p.saveErrors.remove(id)
+        if (p.selected == id) {
+            val nextId = ensureEphemeralDraft(p)
+            p.selected = nextId
+            if (_isConnected.value) p.ready += nextId
         }
     }
 
     suspend fun deleteThread(id: String, expectedProfileKey: String) = withContext(Dispatchers.IO) { operations.withLock {
+        require(!id.startsWith("legacy:")) { "旧 AG-UI 历史只读，未修改原文件" }
+        val localOnlyDeleted = mutex.withLock {
+            val p = profile ?: error("请先连接并同步服务器")
+            require(p.key == expectedProfileKey) { "服务器配置已切换，请重新选择会话" }
+            val snapshot = p.snapshots[id]
+            if (id !in p.remoteIds && snapshot?.remoteDeleted == true) {
+                val currentLink = active?.takeIf { it.profile === p }
+                removeLocalSessionLocked(p, currentLink, id)
+                publish(p)
+                true
+            } else false
+        }
+        if (localOnlyDeleted) return@withLock
         val link = active ?: error("请先连接并同步服务器")
         ensureCurrent(link)
         require(link.profile.key == expectedProfileKey) { "服务器配置已切换，请重新选择会话" }
         require(_isConnected.value) { "请先连接并同步服务器" }
-        require(!id.startsWith("legacy:")) { "旧 AG-UI 历史只读，未修改原文件" }
         // Serialize against periodic saves, including their acknowledgements, until local cleanup finishes.
         link.persistence.withLock {
             val isRemote = mutex.withLock { id in link.profile.remoteIds }
@@ -1495,18 +1541,8 @@ class ConversationRepository(
             }
             mutex.withLock {
                 ensureCurrent(link)
-                val p = link.profile
-                link.artifactJobs.remove(id)?.cancel()
-                p.store.delete(id); p.snapshots.remove(id); p.catalog.remove(id); p.remoteIds -= id; p.drafts -= id
-                p.localDirty -= id; p.serverDirty -= id; p.ready -= id; p.syncing -= id
-                p.blocked.remove(id); p.artifacts.remove(id); p.artifactErrors.remove(id)
-                p.syncErrors.remove(id); p.syncStatus.remove(id); link.runtimes.remove(id)
-                link.previousCatalog.remove(id); link.catalogSynced.remove(id)
-                link.requestedRuntimes.removeAll { it.first == id }
-                link.ignoredSessionIds.remove(id); link.unknownEventSessions.remove(id)
-                p.saveErrors.remove(id); link.checkpoints.forget(id)
-                if (p.selected == id) { p.selected = UUID.randomUUID().toString(); createDraft(p, p.selected); p.ready += p.selected }
-                publish(p)
+                removeLocalSessionLocked(link.profile, link, id)
+                publish(link.profile)
             }
         }
     } }
@@ -1520,8 +1556,13 @@ class ConversationRepository(
         if (trimmed.isEmpty()) return@launch
         val (p, link, needsHydrate) = mutex.withLock {
             val p = profile ?: return@launch
-            val nowSec = System.currentTimeMillis() / 1000
             val snapshot = p.snapshots[id]
+            if (snapshot?.remoteDeleted == true) {
+                _connection.value = REMOTE_DELETED_NOTICE
+                publish(p)
+                return@launch
+            }
+            val nowSec = System.currentTimeMillis() / 1000
             if (snapshot != null) {
                 val updatedSession = snapshot.session.patch("title" to JsonPrimitive(trimmed), "updated_at" to JsonPrimitive(nowSec))
                 putSnapshot(p, id, snapshot.copy(session = updatedSession), serverDirty = true)
@@ -1577,10 +1618,8 @@ class ConversationRepository(
                 uploadToOss = (item["uploadToOss"] as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false,
             )
         }
-        putSnapshot(p, id, snapshot.copy(pendingCommands = WakuCommandPolicy.acknowledge(snapshot.pendingCommands)), false)
-        if (_isConnected.value && _connection.value != "已连接") _connection.value = "已连接"
-        flushLocal(p)
-        publish(p)
+        val updated = snapshot.copy(pendingCommands = WakuCommandPolicy.acknowledge(snapshot.pendingCommands))
+        commitAcknowledgedSnapshot(p, id, updated)
         text to attachments
     }
 
@@ -1680,6 +1719,38 @@ class ConversationRepository(
         return PreparedFiles(native, displayed, ossSettings)
     }
 
+    private fun commitAcknowledgedSnapshot(p: Profile, id: String, updated: WakuSnapshot) {
+        if (WakuDraftPolicy.isEphemeralEmptyDraft(id, updated, p.remoteIds, p.blocked.keys)) {
+            p.snapshots[id] = updated
+            p.drafts += id
+            p.localDirty -= id
+            p.store.delete(id)
+        } else {
+            putSnapshot(p, id, updated, false)
+            flushLocal(p)
+        }
+        if (_isConnected.value && _connection.value != "已连接") _connection.value = "已连接"
+        publish(p)
+    }
+
+    private fun ensureEphemeralDraft(p: Profile): String {
+        val id = WakuDraftPolicy.reusableEmptyDraftId(p.snapshots, p.remoteIds, p.blocked.keys, preferredId = p.selected)
+            ?: UUID.randomUUID().toString()
+        createDraft(p, id)
+        pruneRedundantEmptyDrafts(p, keepId = id)
+        return id
+    }
+
+    private fun pruneRedundantEmptyDrafts(p: Profile, keepId: String?) {
+        for (staleId in WakuDraftPolicy.redundantEmptyDraftIds(p.snapshots, p.remoteIds, p.blocked.keys, keepId)) {
+            p.store.delete(staleId)
+            p.snapshots.remove(staleId); p.drafts -= staleId
+            p.localDirty -= staleId; p.serverDirty -= staleId; p.ready -= staleId; p.syncing -= staleId
+            p.artifacts.remove(staleId); p.artifactErrors.remove(staleId)
+            p.syncErrors.remove(staleId); p.syncStatus.remove(staleId); p.saveErrors.remove(staleId)
+        }
+    }
+
     private fun createDraft(p: Profile, id: String) {
         val projectId = UUID.nameUUIDFromBytes("${p.key}/${p.config.workspace}".toByteArray()).toString()
         p.projects.putIfAbsent(projectId, WakuProjection.createProject(projectId, "Mobile workspace", p.config.workspace))
@@ -1728,16 +1799,27 @@ class ConversationRepository(
                 WakuCatalogSync.mergeDisplayRow(catalogRow, snapshot, liveAttached)?.let { put(id, it) }
             }
         }
-        _threads.value = rows.values.filter { it.s("provider") == "deerFlow" }.mapNotNull { session ->
+        _threads.value = rows.values.filter { session ->
+            val id = session.s("id")
+            session.s("provider") == "deerFlow" &&
+                (id == null || WakuDraftPolicy.shouldShowInThreadList(id, p.snapshots[id], p.remoteIds, p.blocked.keys))
+        }.mapNotNull { session ->
             val id = session.s("id") ?: return@mapNotNull null
-            ThreadMeta(id, WakuSessionTitles.display(session), session.n("updated_at") * 1000, true)
+            ThreadMeta(
+                id = id,
+                title = WakuSessionTitles.display(session),
+                lastActive = session.n("updated_at") * 1000,
+                isTitleFetched = true,
+                remoteDeleted = p.snapshots[id]?.remoteDeleted == true,
+            )
         }.sortedByDescending { it.lastActive } + legacyIndex
-        _runningThreadIds.value = rows.filterValues { it.s("status") in BUSY }.keys
-        val running = rows.values.filter { it.s("provider") == "deerFlow" && it.s("status") in BUSY }
+        val activeRows = rows.filterKeys { id -> p.snapshots[id]?.remoteDeleted != true }
+        _runningThreadIds.value = activeRows.filterValues { it.s("status") in BUSY }.keys
+        val running = activeRows.values.filter { it.s("provider") == "deerFlow" && it.s("status") in BUSY }
         backgroundSummary.value = BackgroundWork(
             runningTasks = running.size,
             waitingTasks = running.count { it.s("status") == "waiting" },
-            pendingOperations = p.snapshots.values.filter { it.session.s("provider") == "deerFlow" }
+            pendingOperations = p.snapshots.values.filter { !it.remoteDeleted && it.session.s("provider") == "deerFlow" }
                 .sumOf { stored -> stored.pendingCommands.count { it.s("state") in setOf("prepared", "sending", "accepted", "unknown") } },
         )
         val snapshot = p.snapshots[p.selected]
@@ -1786,6 +1868,7 @@ class ConversationRepository(
     }.getOrElse { ConversationState(id, status = "旧历史无法读取；原文件未修改") }
 
     companion object {
+        private const val REMOTE_DELETED_NOTICE = "服务器中已没有此会话，本地历史只读；请新建会话。"
         private val BUSY = setOf("connecting", "working", "waiting", "background")
         @Volatile private var instance: ConversationRepository? = null
         fun get(context: Context): ConversationRepository = instance ?: synchronized(this) {

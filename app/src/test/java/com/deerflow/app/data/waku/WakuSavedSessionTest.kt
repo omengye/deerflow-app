@@ -13,12 +13,17 @@ class WakuSavedSessionTest {
     @Test fun matchingSaveAdoptsBlobReferencesAndPreservesLocalCommandState() {
         val submitted = session(1, "data:image/png;base64,fixture")
         val command = buildJsonObject { put("kind", "cancel"); put("state", "sending") }
-        val current = WakuProjection.fromSession(submitted).copy(session = submitted, pendingCommands = listOf(command))
+        val current = WakuProjection.fromSession(submitted).copy(
+            session = submitted,
+            pendingCommands = listOf(command),
+            remoteDeleted = true,
+        )
         val saved = session(1, "waku-blob:image.png")
         val merged = WakuSavedSession.merge(current, submitted, saved)
         assertEquals(saved, merged.session)
         assertEquals(listOf(command), merged.pendingCommands)
         assertTrue(merged.remoteKnown)
+        assertFalse(merged.remoteDeleted)
     }
 
     @Test fun lateSaveAcknowledgementCannotOverwriteNewerStreamContent() {

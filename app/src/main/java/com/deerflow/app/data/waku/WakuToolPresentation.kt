@@ -46,6 +46,12 @@ internal object WakuToolPresentation {
         }
     }
 
+    fun taskTitle(activity: JsonObject): String? =
+        activity.label("task_title") ?: activity.label("step_title")
+
+    fun agentName(activity: JsonObject): String? =
+        activity.label("agent_name") ?: activity.label("subagent")
+
     private fun JsonObject.label(key: String): String? =
         (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
 }

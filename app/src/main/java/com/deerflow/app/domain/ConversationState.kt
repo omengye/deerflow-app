@@ -37,6 +37,9 @@ data class ToolDetails(
     val isError: Boolean = false,
     /** True only while this tool invocation is still running, independently of the whole turn. */
     val isRunning: Boolean = false,
+    val taskTitle: String? = null,
+    val agentName: String? = null,
+    val kind: String? = null,
 )
 
 enum class BlockKind { USER, ASSISTANT, REASONING, THINKING, TOOL, ARTIFACT, SYSTEM, INTERRUPT, ERROR }

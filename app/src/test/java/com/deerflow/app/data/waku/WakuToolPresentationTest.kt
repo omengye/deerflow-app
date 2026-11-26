@@ -2,6 +2,7 @@ package com.deerflow.app.data.waku
 
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class WakuToolPresentationTest {
@@ -65,5 +66,35 @@ class WakuToolPresentationTest {
         assertEquals("读取文件", WakuToolPresentation.name(buildJsonObject {
             put("kind", "fileRead"); put("title", "secret.txt")
         }))
+    }
+
+    @Test fun taskTitleAndAgentNameOnlyReadStructuredTopLevelFields() {
+        val structured = buildJsonObject {
+            put("task_title", "核对已有故障事实")
+            put("step_title", "兜底步骤标题")
+            put("agent_name", "sre-coordinator")
+            put("subagent", "fallback-agent")
+            put("title", "/private/secret/path")
+            put("detail", "sensitive output")
+            put("arguments", """{"task_title":"leaked","agent_name":"leaked"}""")
+        }
+        assertEquals("核对已有故障事实", WakuToolPresentation.taskTitle(structured))
+        assertEquals("sre-coordinator", WakuToolPresentation.agentName(structured))
+
+        val fallbackKeys = buildJsonObject {
+            put("step_title", "阶段验证")
+            put("subagent", "worker-1")
+        }
+        assertEquals("阶段验证", WakuToolPresentation.taskTitle(fallbackKeys))
+        assertEquals("worker-1", WakuToolPresentation.agentName(fallbackKeys))
+
+        val unstructured = buildJsonObject {
+            put("title", "/private/secret/path")
+            put("detail", "sensitive output")
+            put("output", "sensitive result")
+            put("arguments", """{"task_title":"leaked","agent_name":"leaked"}""")
+        }
+        assertNull(WakuToolPresentation.taskTitle(unstructured))
+        assertNull(WakuToolPresentation.agentName(unstructured))
     }
 }

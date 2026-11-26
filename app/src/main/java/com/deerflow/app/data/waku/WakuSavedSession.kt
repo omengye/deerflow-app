@@ -11,6 +11,10 @@ object WakuSavedSession {
             (confirmed["runtime_event_cursor"] ?: JsonNull) == (submitted["runtime_event_cursor"] ?: JsonNull)) {
             "服务器会话状态已变化，请重新同步后核对"
         }
-        return current.copy(session = if (current.session === submitted) confirmed else current.session, remoteKnown = true)
+        return current.copy(
+            session = if (current.session === submitted) confirmed else current.session,
+            remoteKnown = true,
+            remoteDeleted = false,
+        )
     }
 }
