@@ -1,126 +1,182 @@
 package com.deerflow.app.ui.chat
 
-import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.AddComment
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.InputChip
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.InputChip
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.saveable.rememberSaveable
-import com.deerflow.app.data.drafts.ComposerDraft
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.material3.TextButton
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.repeatOnLifecycle
 import androidx.core.content.FileProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.deerflow.app.R
 import com.deerflow.app.data.PendingAttachment
+import com.deerflow.app.data.drafts.ComposerDraft
 import com.deerflow.app.data.proposal.SkillProposal
 import com.deerflow.app.data.proposal.isActive
+import com.deerflow.app.domain.BlockKind
 import com.deerflow.app.domain.ConversationState
+import com.deerflow.app.domain.GroupedTranscriptEntry
+import com.deerflow.app.domain.ToolGroup
+import com.deerflow.app.domain.TranscriptGrouping
+import com.deerflow.app.domain.model.AgentArtifact
+import com.deerflow.app.domain.model.MessageFile
 import com.deerflow.app.domain.model.ThreadMeta
 import com.deerflow.app.ui.proposal.ProposalCard
 import com.deerflow.app.ui.proposal.ProposalViewModel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.delay
+import com.deerflow.app.ui.theme.deerflowColors
 import java.io.File
-import java.util.Locale
+import java.time.LocalDate
+import java.time.ZoneId
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     vm: ChatViewModel,
     proposalVm: ProposalViewModel,
+    onOpenArtifacts: () -> Unit,
     onOpenEvolution: () -> Unit,
+    onOpenMemory: () -> Unit,
     onOpenSettings: () -> Unit,
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val threads by vm.threads.collectAsStateWithLifecycle()
+    val runningThreadIds by vm.runningThreadIds.collectAsStateWithLifecycle()
     val deletion by vm.deletion.collectAsStateWithLifecycle()
-    val sessionTitle = threads.firstOrNull { it.id == state.threadId }?.title ?: "DeerFlow"
+    val activeThread = threads.firstOrNull { it.id == state.threadId }
+    val sessionTitle = activeThread?.title?.takeUnless { it == "New task" } ?: "新对话"
     val proposalState by proposalVm.state.collectAsStateWithLifecycle()
     val artifactHeaders by vm.artifactHeaders.collectAsStateWithLifecycle()
     val connection by vm.connection.collectAsStateWithLifecycle()
@@ -135,6 +191,7 @@ fun ChatScreen(
     val profileKey by vm.profileKey.collectAsStateWithLifecycle()
     val secureCredentialTransport by vm.secureCredentialTransport.collectAsStateWithLifecycle()
     val scheme = MaterialTheme.colorScheme
+    val semantic = MaterialTheme.deerflowColors
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -145,12 +202,31 @@ fun ChatScreen(
     val taskFiles by vm.taskFiles.collectAsStateWithLifecycle()
     val transcriptListState = rememberLazyListState()
     val transcriptItemCount = remember(state.threadId) { mutableStateOf(0) }
-    var filesVisible by rememberSaveable(state.threadId) { mutableStateOf(false) }
-    if (filesVisible) {
-        ArtifactsScreen(state = taskFiles, onBack = { filesVisible = false }, onRefresh = { vm.refreshArtifacts() },
-            resolve = { vm.resolveArtifact(it, state.threadId) })
-        return
+    val allowInputFocus = remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val proposalLifecycleOwner = LocalLifecycleOwner.current
+
+    fun dismissInputFocus() {
+        allowInputFocus.value = false
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
     }
+
+    LaunchedEffect(state.threadId) {
+        dismissInputFocus()
+    }
+    LaunchedEffect(drawerState.isOpen) {
+        if (drawerState.isOpen) dismissInputFocus()
+    }
+    DisposableEffect(proposalLifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) dismissInputFocus()
+        }
+        proposalLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { proposalLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     val unavailableAttachments = composer.unavailable[draftKey].orEmpty()
     val draftError = composer.errors[draftKey]
     var pendingCameraUri by rememberSaveable { mutableStateOf<String?>(null) }
@@ -158,7 +234,11 @@ fun ChatScreen(
     var pickerDraftKey by rememberSaveable { mutableStateOf<String?>(null) }
     var renameThreadMeta by remember { mutableStateOf<ThreadMeta?>(null) }
     var renameText by remember { mutableStateOf("") }
+    var deleteConfirmMeta by remember { mutableStateOf<ThreadMeta?>(null) }
+    var drawerSearch by rememberSaveable { mutableStateOf("") }
+
     LaunchedEffect(draftKey) { vm.loadDraft(draftKey) }
+
     val threadProposals = remember(proposalState.proposals, state.threadId) {
         proposalState.proposals
             .filter { it.trigger.threadId == state.threadId }
@@ -166,8 +246,10 @@ fun ChatScreen(
             .sortedBy { it.createdAt }
             .take(MAX_THREAD_PROPOSAL_CARDS)
     }
+    val activeProposalCount = remember(proposalState.proposals) {
+        proposalState.proposals.count { it.isActive }
+    }
 
-    val proposalLifecycleOwner = LocalLifecycleOwner.current
     val hasActiveProposals = threadProposals.isNotEmpty()
     LaunchedEffect(proposalLifecycleOwner, hasActiveProposals) {
         proposalLifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -205,226 +287,497 @@ fun ChatScreen(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(
-                drawerContainerColor = scheme.surface,
-                drawerContentColor = scheme.onSurface
+                drawerContainerColor = scheme.surfaceContainerLow,
+                drawerContentColor = scheme.onSurface,
+                modifier = Modifier.widthIn(max = 316.dp),
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(16.dp)
+                        .padding(horizontal = 14.dp, vertical = 12.dp),
                 ) {
-                    Text(
-                        text = "History",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = scheme.primary,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.deerflow_logo),
+                                contentDescription = "DeerFlow",
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .clip(RoundedCornerShape(8.dp)),
+                            )
+                            Text(
+                                text = "DeerFlow",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = scheme.onSurface,
+                            )
+                        }
+                        Surface(
+                            color = if (connected) semantic.successContainer else scheme.surfaceContainerHigh,
+                            contentColor = if (connected) semantic.onSuccessContainer else scheme.onSurfaceVariant,
+                            shape = RoundedCornerShape(10.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(if (connected) semantic.success else scheme.error),
+                                )
+                                Text(
+                                    text = if (connected) "已连接" else "未连接",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                    }
 
-                    // Prominent New Chat button inside the drawer, satisfying standard AI chat design
+                    Spacer(Modifier.height(10.dp))
+
                     Button(
                         onClick = {
                             vm.newThread()
                             coroutineScope.launch { drawerState.close() }
                         },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 16.dp),
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = scheme.primaryContainer,
-                            contentColor = scheme.onPrimaryContainer
+                            contentColor = scheme.onPrimaryContainer,
                         ),
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RoundedCornerShape(12.dp),
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = "New Chat")
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
-                        Text("New Chat", fontWeight = FontWeight.Bold)
+                        Text("新建对话", fontWeight = FontWeight.SemiBold)
                     }
 
-                    HorizontalDivider(color = scheme.outline.copy(alpha = 0.2f))
+                    if (threads.size > 5) {
+                        Spacer(Modifier.height(10.dp))
+                        OutlinedTextField(
+                            value = drawerSearch,
+                            onValueChange = { drawerSearch = it },
+                            placeholder = { Text("搜索会话…", style = MaterialTheme.typography.bodySmall) },
+                            leadingIcon = {
+                                Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                            },
+                            trailingIcon = {
+                                if (drawerSearch.isNotEmpty()) {
+                                    IconButton(onClick = { drawerSearch = "" }, modifier = Modifier.size(28.dp)) {
+                                        Icon(Icons.Default.Close, contentDescription = "清除搜索", modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+
+                    Spacer(Modifier.height(10.dp))
+                    HorizontalDivider(color = scheme.outlineVariant)
                     Spacer(Modifier.height(8.dp))
 
-                    val runningThreadIds by vm.runningThreadIds.collectAsStateWithLifecycle()
+                    val todayBucket = remember(threads) { LocalDate.now().toEpochDay() }
+                    val groupedThreads = remember(threads, drawerSearch, todayBucket) {
+                        groupThreadsByRecency(threads, drawerSearch)
+                    }
+
                     LazyColumn(
                         modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        items(threads, key = { it.id }) { meta ->
-                            val isActive = meta.id == state.threadId
-                            val isRunning = meta.id in runningThreadIds
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (isActive) scheme.primary.copy(alpha = 0.15f)
-                                        else Color.Transparent
-                                    )
-                                    .clickable {
-                                        vm.selectThread(meta.id)
-                                        coroutineScope.launch { drawerState.close() }
-                                    }
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
+                        if (groupedThreads.isEmpty()) {
+                            item(key = "empty_threads") {
                                 Text(
-                                    text = meta.title,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (isActive) scheme.primary else scheme.onSurface,
-                                    modifier = Modifier.weight(1f)
+                                    text = if (drawerSearch.isBlank()) "暂无历史会话" else "没有匹配的会话",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = scheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp),
                                 )
-                                if (isRunning) {
-                                    Box(
+                            }
+                        } else {
+                            groupedThreads.forEach { section ->
+                                item(key = "section:${section.label}") {
+                                    Text(
+                                        text = section.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = scheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(start = 10.dp, top = 8.dp, bottom = 4.dp),
+                                    )
+                                }
+                                items(section.items, key = { "thread:${it.id}" }) { meta ->
+                                    val isActive = meta.id == state.threadId
+                                    val isRunning = meta.id in runningThreadIds
+                                    var menuOpen by remember(meta.id) { mutableStateOf(false) }
+
+                                    Row(
                                         modifier = Modifier
-                                            .padding(start = 8.dp, end = 4.dp)
-                                            .size(8.dp)
-                                            .background(scheme.primary, CircleShape)
-                                    )
-                                }
-                                if (!meta.id.startsWith("legacy:")) {
-                                    IconButton(
-                                        onClick = {
-                                            renameThreadMeta = meta
-                                            renameText = meta.title
-                                        },
-                                        modifier = Modifier.size(24.dp)
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(
+                                                if (isActive) scheme.primaryContainer.copy(alpha = 0.65f)
+                                                else Color.Transparent,
+                                            )
+                                            .clickable {
+                                                vm.selectThread(meta.id)
+                                                coroutineScope.launch { drawerState.close() }
+                                            }
+                                            .padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Edit,
-                                            contentDescription = "Rename thread",
-                                            tint = scheme.onSurface.copy(alpha = 0.4f),
-                                            modifier = Modifier.size(16.dp)
+                                        if (isRunning) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.padding(end = 8.dp).size(14.dp),
+                                                strokeWidth = 2.dp,
+                                                color = scheme.primary,
+                                            )
+                                        } else if (meta.remoteDeleted) {
+                                            Icon(
+                                                imageVector = Icons.Default.CloudOff,
+                                                contentDescription = "服务端已删除",
+                                                tint = semantic.warning,
+                                                modifier = Modifier.padding(end = 8.dp).size(15.dp),
+                                            )
+                                        }
+                                        Text(
+                                            text = meta.title.takeUnless { it == "New task" } ?: "新对话",
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Normal,
+                                            color = when {
+                                                isActive -> scheme.onPrimaryContainer
+                                                meta.remoteDeleted -> scheme.onSurfaceVariant
+                                                else -> scheme.onSurface
+                                            },
+                                            modifier = Modifier.weight(1f),
                                         )
+                                        if (!meta.id.startsWith("legacy:")) {
+                                            Box {
+                                                IconButton(
+                                                    onClick = { menuOpen = true },
+                                                    modifier = Modifier.size(36.dp),
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.MoreVert,
+                                                        contentDescription = "会话操作",
+                                                        tint = scheme.onSurfaceVariant,
+                                                        modifier = Modifier.size(18.dp),
+                                                    )
+                                                }
+                                                DropdownMenu(
+                                                    expanded = menuOpen,
+                                                    onDismissRequest = { menuOpen = false },
+                                                ) {
+                                                    if (!meta.remoteDeleted) {
+                                                        DropdownMenuItem(
+                                                            text = { Text("重命名") },
+                                                            leadingIcon = {
+                                                                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                                                            },
+                                                            onClick = {
+                                                                menuOpen = false
+                                                                renameThreadMeta = meta
+                                                                renameText = meta.title
+                                                            },
+                                                        )
+                                                    }
+                                                    DropdownMenuItem(
+                                                        text = { Text("删除会话", color = scheme.error) },
+                                                        leadingIcon = {
+                                                            Icon(Icons.Default.Delete, contentDescription = null, tint = scheme.error, modifier = Modifier.size(18.dp))
+                                                        },
+                                                        enabled = deletion?.inProgress != true,
+                                                        onClick = {
+                                                            menuOpen = false
+                                                            deleteConfirmMeta = meta
+                                                        },
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
-                                }
-                                IconButton(
-                                    onClick = { vm.deleteThread(meta.id) },
-                                    enabled = !meta.id.startsWith("legacy:") && deletion?.inProgress != true,
-                                    modifier = Modifier.size(24.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Delete,
-                                        contentDescription = "Delete thread",
-                                        tint = scheme.onSurface.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(16.dp)
-                                    )
                                 }
                             }
                         }
                     }
+
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider(color = scheme.outlineVariant)
+                    Spacer(Modifier.height(6.dp))
+
+                    DrawerNavItem(
+                        icon = Icons.Default.AutoAwesome,
+                        label = "技能演进",
+                        badgeText = activeProposalCount.takeIf { it > 0 }?.toString(),
+                        showDot = false,
+                        onClick = {
+                            coroutineScope.launch { drawerState.close() }
+                            onOpenEvolution()
+                        },
+                    )
+                    DrawerNavItem(
+                        icon = Icons.Default.Psychology,
+                        label = "个人记忆",
+                        badgeText = null,
+                        showDot = false,
+                        onClick = {
+                            coroutineScope.launch { drawerState.close() }
+                            onOpenMemory()
+                        },
+                    )
+                    DrawerNavItem(
+                        icon = Icons.Default.Settings,
+                        label = "设置",
+                        badgeText = null,
+                        showDot = !connected,
+                        onClick = {
+                            coroutineScope.launch { drawerState.close() }
+                            onOpenSettings()
+                        },
+                    )
                 }
             }
-        }
+        },
     ) {
+        val (statusDotColor, statusLabel) = remember(connected, connection, activeThread?.remoteDeleted, state.status, state.running) {
+            resolveHeaderStatus(
+                connected = connected,
+                connection = connection,
+                remoteDeleted = activeThread?.remoteDeleted == true,
+                stateStatus = state.status,
+                running = state.running,
+                successColor = semantic.success,
+                warningColor = semantic.warning,
+                primaryColor = scheme.primary,
+                errorColor = scheme.error,
+            )
+        }
+
         Scaffold(
             containerColor = scheme.background,
             topBar = {
                 TopAppBar(
                     title = {
-                        Text(
-                            sessionTitle,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            fontWeight = FontWeight.Bold,
-                            style = MaterialTheme.typography.titleMedium
-                        )
+                        Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(
+                                    text = sessionTitle,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontWeight = FontWeight.SemiBold,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                )
+                                if (activeThread?.remoteDeleted == true) {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudOff,
+                                        contentDescription = "服务端已删除",
+                                        tint = semantic.warning,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                }
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(statusDotColor),
+                                )
+                                Text(
+                                    text = statusLabel,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = scheme.background,
-                        titleContentColor = scheme.onBackground
+                        titleContentColor = scheme.onBackground,
                     ),
                     navigationIcon = {
                         IconButton(onClick = { coroutineScope.launch { drawerState.open() } }) {
-                            Icon(Icons.Default.Menu, contentDescription = "Menu", tint = scheme.onBackground)
+                            Icon(Icons.Default.Menu, contentDescription = "打开历史抽屉", tint = scheme.onBackground)
                         }
                     },
                     actions = {
-                        TextButton(onClick = { filesVisible = true; vm.refreshArtifacts() }) {
-                            Text(if (taskFiles.files.isEmpty()) "产物" else "产物 ${taskFiles.files.size}")
+                        IconButton(onClick = onOpenArtifacts) {
+                            if (taskFiles.files.isNotEmpty()) {
+                                BadgedBox(
+                                    badge = {
+                                        Badge(containerColor = scheme.primary, contentColor = scheme.onPrimary) {
+                                            Text(taskFiles.files.size.toString())
+                                        }
+                                    },
+                                ) {
+                                    Icon(Icons.Outlined.FolderOpen, contentDescription = "会话产物")
+                                }
+                            } else {
+                                Icon(Icons.Outlined.FolderOpen, contentDescription = "会话产物")
+                            }
                         }
                         IconButton(onClick = vm::refresh) {
                             Icon(Icons.Default.Refresh, contentDescription = "重新同步会话和产物")
                         }
-                        TextButton(onClick = { proposalVm.clearSelection(); onOpenEvolution() }) { Text("技能") }
-                        IconButton(onClick = onOpenSettings) {
-                            Icon(Icons.Default.Settings, contentDescription = "Settings", tint = scheme.onBackground.copy(alpha = 0.7f))
+                        IconButton(onClick = vm::newThread) {
+                            Icon(Icons.Outlined.AddComment, contentDescription = "新建对话")
                         }
                     },
                 )
             },
             bottomBar = {
+                val protocolStates = remember {
+                    setOf("", "idle", "Idle", "connecting", "working", "waiting", "background", "failed")
+                }
+                val hasConnectionNotice = !connected ||
+                    (connection.isNotBlank() && connection != "已连接" && submission.issue?.contains(connection) != true)
+                val statusNotice = state.status.takeIf { it !in protocolStates && it != connection }
+
                 Column(
                     modifier = Modifier
+                        .fillMaxWidth()
                         .background(scheme.background)
-                        .imePadding()
+                        .windowInsetsPadding(WindowInsets.navigationBars.union(WindowInsets.ime)),
                 ) {
-                    val hasConnectionNotice = !connected || (connection.isNotBlank() && connection != "已连接" && submission.issue?.contains(connection) != true)
-                    if (hasConnectionNotice || submission.issue != null) {
-                        Column(Modifier.fillMaxWidth().background(scheme.surfaceVariant).padding(horizontal = 12.dp, vertical = 6.dp)) {
-                            if (hasConnectionNotice) {
-                                Text(connection, style = MaterialTheme.typography.bodySmall)
-                                if (!connected) {
-                                    Row {
-                                        TextButton(onClick = vm::refresh) { Text("重新同步") }
-                                        TextButton(onClick = onOpenSettings) { Text("连接设置") }
+                    if (hasConnectionNotice || statusNotice != null || submission.issue != null) {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            color = scheme.surfaceContainerHigh,
+                            border = BorderStroke(1.dp, scheme.outlineVariant),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                if (hasConnectionNotice) {
+                                    Text(connection, style = MaterialTheme.typography.bodySmall, color = scheme.onSurface)
+                                    if (!connected) {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            TextButton(onClick = vm::refresh) { Text("重新同步") }
+                                            TextButton(onClick = onOpenSettings) { Text("连接设置") }
+                                        }
                                     }
                                 }
-                            }
-                            submission.issue?.let { pending ->
-                                Text(
-                                    if (submission.needsReview) "这次操作的结果尚未确认。请先核对会话记录，避免重复执行。"
-                                    else if (submission.canRestorePrompt) "消息未发送成功，原文已保留。"
-                                    else "操作未完成。",
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                Text(pending, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
-                                Row {
-                                    if (submission.canRestorePrompt) {
-                                        TextButton(onClick = { clipboard.setText(AnnotatedString(pending)) }) { Text("复制原文") }
-                                        TextButton(enabled = submission.canResolve, onClick = { vm.restorePendingToDraft(draftKey) }) { Text("恢复到输入框") }
-                                    }
-                                    TextButton(enabled = submission.canResolve, onClick = { vm.acknowledgeUnknown(); reviewReset++ }) {
-                                        Text(if (submission.needsReview) "已核对" else "关闭")
+                                if (statusNotice != null) {
+                                    Text(statusNotice, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
+                                }
+                                submission.issue?.let { pending ->
+                                    Text(
+                                        text = when {
+                                            submission.needsReview -> "这次操作的结果尚未确认。请先核对会话记录，避免重复执行。"
+                                            submission.canRestorePrompt -> "消息未发送成功，原文已保留。"
+                                            else -> "操作未完成。"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = scheme.error,
+                                    )
+                                    Text(
+                                        text = pending,
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = scheme.onSurface,
+                                    )
+                                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        if (submission.canRestorePrompt) {
+                                            TextButton(onClick = { clipboard.setText(AnnotatedString(pending)) }) { Text("复制原文") }
+                                            TextButton(
+                                                enabled = submission.canResolve,
+                                                onClick = { vm.restorePendingToDraft(draftKey) },
+                                            ) { Text("恢复到输入框") }
+                                        }
+                                        TextButton(
+                                            enabled = submission.canResolve,
+                                            onClick = { vm.acknowledgeUnknown(); reviewReset++ },
+                                        ) {
+                                            Text(if (submission.needsReview) "已核对" else "关闭")
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
                     PendingActions(
-                        permissions = permissions, requests = questions, enabled = connected, resetKey = reviewReset,
-                        secureCredentialTransport = secureCredentialTransport, onCredential = vm::respondCredential,
-                        onPermission = vm::respondPermission, onAnswers = vm::respondUserInput,
+                        permissions = permissions,
+                        requests = questions,
+                        enabled = connected,
+                        resetKey = reviewReset,
+                        secureCredentialTransport = secureCredentialTransport,
+                        onCredential = vm::respondCredential,
+                        onPermission = vm::respondPermission,
+                        onAnswers = vm::respondUserInput,
                     )
-                    StatusBar(state)
+
                     if (draftError != null || unavailableAttachments.isNotEmpty()) {
-                        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
-                            if (draftError != null) Text(draftError, color = scheme.error, style = MaterialTheme.typography.bodySmall)
-                            if (unavailableAttachments.isNotEmpty()) Text(
-                                "以下附件已不可访问，请移除或重新选择：" + attachments.filter { it.uri.toString() in unavailableAttachments }.joinToString { it.displayName },
-                                color = scheme.error, style = MaterialTheme.typography.bodySmall,
-                            )
-                            Row {
-                                TextButton(onClick = { vm.retryDraft(draftKey) }) { Text("重试草稿") }
-                                TextButton(onClick = { vm.clearDraft(draftKey) }) { Text("清空草稿") }
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            color = scheme.errorContainer,
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                if (draftError != null) {
+                                    Text(draftError, color = scheme.onErrorContainer, style = MaterialTheme.typography.bodySmall)
+                                }
+                                if (unavailableAttachments.isNotEmpty()) {
+                                    Text(
+                                        text = "以下附件已不可访问，请移除或重新选择：" +
+                                            attachments.filter { it.uri.toString() in unavailableAttachments }.joinToString { it.displayName },
+                                        color = scheme.onErrorContainer,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                Row {
+                                    TextButton(onClick = { vm.retryDraft(draftKey) }) { Text("重试草稿") }
+                                    TextButton(onClick = { vm.clearDraft(draftKey) }) { Text("清空草稿") }
+                                }
                             }
                         }
                     }
+
                     InputBar(
                         running = state.running,
                         awaitingInterrupt = false,
-                        canSend = canSend && draftReady && unavailableAttachments.isEmpty() && draftError == null && draftKey !in composer.checkingAttachments && draftKey !in composer.submitting,
+                        canSend = canSend && draftReady && unavailableAttachments.isEmpty() && draftError == null &&
+                            draftKey !in composer.checkingAttachments && draftKey !in composer.submitting,
                         editable = draftReady,
                         text = draft.text,
+                        allowFocusState = allowInputFocus,
+                        onRejectUnrequestedFocus = ::dismissInputFocus,
                         onTextChanged = { vm.updateDraftText(draftKey, it) },
                         attachments = attachments,
                         onOssChanged = { vm.setDraftOss(draftKey, it) },
                         onSubmit = { text, files ->
                             val accepted = vm.submit(text, files, draftKey)
-
+                            if (accepted) dismissInputFocus()
                             accepted
                         },
                         onCancel = vm::cancel,
@@ -451,47 +804,100 @@ fun ChatScreen(
                 }
             },
         ) { padding ->
-            Transcript(
-                state = state,
-                listState = transcriptListState,
-                itemCount = transcriptItemCount,
-                artifactHeaders = artifactHeaders,
-                resolveMessageFile = { vm.resolveMessageFile(it, state.threadId) },
-                resolveGeneratedImage = { reference, messageId -> vm.resolveGeneratedImage(reference, messageId, state.threadId, profileKey) },
-                imageScopeKey = draftKey,
-                imageReloadKey = connected,
-                proposals = threadProposals,
-                onViewProposal = { proposalId ->
-                    proposalVm.select(proposalId)
-                    onOpenEvolution()
-                },
-                modifier = Modifier.padding(padding),
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            if (allowInputFocus.value) dismissInputFocus()
+                        }
+                    },
+            ) {
+                Transcript(
+                    state = state,
+                    listState = transcriptListState,
+                    itemCount = transcriptItemCount,
+                    connected = connected,
+                    connectionText = connection,
+                    artifactHeaders = artifactHeaders,
+                    resolveMessageFile = { vm.resolveMessageFile(it, state.threadId) },
+                    resolveGeneratedImage = { reference, messageId -> vm.resolveGeneratedImage(reference, messageId, state.threadId, profileKey) },
+                    imageScopeKey = draftKey,
+                    imageReloadKey = connected,
+                    proposals = threadProposals,
+                    onViewProposal = { proposalId ->
+                        proposalVm.select(proposalId)
+                        onOpenEvolution()
+                    },
+                    onOpenSettings = onOpenSettings,
+                    onRefresh = vm::refresh,
+                    onPickSuggestion = { suggestion ->
+                        if (draftReady) {
+                            vm.updateDraftText(draftKey, suggestion)
+                            allowInputFocus.value = true
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
+    }
+
+    deleteConfirmMeta?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteConfirmMeta = null },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = scheme.surfaceContainerLow,
+            title = { Text("删除会话？") },
+            text = {
+                Text("将删除「${target.title.takeUnless { it == "New task" } ?: "新对话"}」的服务端会话及本地记录，此操作不可恢复。")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        deleteConfirmMeta = null
+                        vm.deleteThread(target.id)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = scheme.error, contentColor = scheme.onError),
+                    shape = RoundedCornerShape(12.dp),
+                ) { Text("确认删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteConfirmMeta = null }) { Text("取消") }
+            },
+        )
     }
 
     deletion?.takeIf { it.profileKey == profileKey }?.let { deleting ->
         AlertDialog(
             onDismissRequest = vm::dismissDeletion,
+            shape = RoundedCornerShape(20.dp),
+            containerColor = scheme.surfaceContainerLow,
             title = { Text(if (deleting.inProgress) "正在删除会话" else "未能删除会话") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(threads.firstOrNull { it.id == deleting.threadId }?.title ?: "所选会话")
                     if (deleting.inProgress) {
-                        Text("正在等待服务器确认删除…")
+                        Text("正在等待服务器确认删除…", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                     } else {
-                        Text(deleting.error.orEmpty())
-                        Text("本地会话记录和草稿已保留。请核对上方原因，重新同步后查看会话状态。")
+                        Text(deleting.error.orEmpty(), color = scheme.error, style = MaterialTheme.typography.bodySmall)
+                        Text("本地会话记录和草稿已保留。请核对上方原因，重新同步后查看会话状态。", style = MaterialTheme.typography.bodySmall)
                     }
                 }
             },
             confirmButton = {
-                if (!deleting.inProgress) TextButton(onClick = {
-                    vm.dismissDeletion()
-                    vm.selectThread(deleting.threadId)
-                    coroutineScope.launch { drawerState.close() }
-                }) { Text("查看会话") }
+                if (!deleting.inProgress) {
+                    TextButton(
+                        onClick = {
+                            vm.dismissDeletion()
+                            vm.selectThread(deleting.threadId)
+                            coroutineScope.launch { drawerState.close() }
+                        },
+                    ) { Text("查看会话") }
+                }
             },
             dismissButton = {
                 if (!deleting.inProgress) TextButton(onClick = vm::dismissDeletion) { Text("关闭") }
@@ -502,6 +908,8 @@ fun ChatScreen(
     if (renameThreadMeta != null) {
         AlertDialog(
             onDismissRequest = { renameThreadMeta = null },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = scheme.surfaceContainerLow,
             title = { Text("重命名会话") },
             text = {
                 OutlinedTextField(
@@ -509,36 +917,163 @@ fun ChatScreen(
                     onValueChange = { renameText = it },
                     label = { Text("会话标题") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 )
             },
             confirmButton = {
-                TextButton(
+                Button(
                     onClick = {
                         val target = renameThreadMeta
                         if (target != null && renameText.isNotBlank()) {
                             vm.renameThread(target.id, renameText.trim())
                         }
                         renameThreadMeta = null
-                    }
-                ) {
-                    Text("确定")
-                }
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                ) { Text("确定") }
             },
             dismissButton = {
-                TextButton(onClick = { renameThreadMeta = null }) {
-                    Text("取消")
-                }
-            }
+                TextButton(onClick = { renameThreadMeta = null }) { Text("取消") }
+            },
         )
+    }
+}
+
+private data class ThreadSection(val label: String, val items: List<ThreadMeta>)
+
+private fun groupThreadsByRecency(threads: List<ThreadMeta>, query: String): List<ThreadSection> {
+    val trimmed = query.trim()
+    val filtered = if (trimmed.isEmpty()) threads else threads.filter {
+        it.title.contains(trimmed, ignoreCase = true)
+    }
+    if (filtered.isEmpty()) return emptyList()
+
+    val legacy = filtered.filter { it.id.startsWith("legacy:") }
+    val active = filtered.filterNot { it.id.startsWith("legacy:") }
+
+    val zone = ZoneId.systemDefault()
+    val today = LocalDate.now(zone)
+    val startOfToday = today.atStartOfDay(zone).toInstant().toEpochMilli()
+    val startOfYesterday = today.minusDays(1).atStartOfDay(zone).toInstant().toEpochMilli()
+    val startOf7Days = today.minusDays(7).atStartOfDay(zone).toInstant().toEpochMilli()
+    val startOf30Days = today.minusDays(30).atStartOfDay(zone).toInstant().toEpochMilli()
+
+    val todayList = mutableListOf<ThreadMeta>()
+    val yesterdayList = mutableListOf<ThreadMeta>()
+    val weekList = mutableListOf<ThreadMeta>()
+    val monthList = mutableListOf<ThreadMeta>()
+    val olderList = mutableListOf<ThreadMeta>()
+
+    active.forEach { meta ->
+        val ts = meta.lastActive
+        when {
+            ts >= startOfToday -> todayList += meta
+            ts >= startOfYesterday -> yesterdayList += meta
+            ts >= startOf7Days -> weekList += meta
+            ts >= startOf30Days -> monthList += meta
+            else -> olderList += meta
+        }
+    }
+
+    return buildList {
+        if (todayList.isNotEmpty()) add(ThreadSection("今天", todayList))
+        if (yesterdayList.isNotEmpty()) add(ThreadSection("昨天", yesterdayList))
+        if (weekList.isNotEmpty()) add(ThreadSection("最近 7 天", weekList))
+        if (monthList.isNotEmpty()) add(ThreadSection("最近 30 天", monthList))
+        if (olderList.isNotEmpty()) add(ThreadSection("更早", olderList))
+        if (legacy.isNotEmpty()) add(ThreadSection("旧历史（只读）", legacy))
+    }
+}
+
+private fun resolveHeaderStatus(
+    connected: Boolean,
+    connection: String,
+    remoteDeleted: Boolean,
+    stateStatus: String,
+    running: Boolean,
+    successColor: Color,
+    warningColor: Color,
+    primaryColor: Color,
+    errorColor: Color,
+): Pair<Color, String> = when {
+    !connected -> errorColor to connection.ifBlank { "未连接" }
+    connection.isNotBlank() && connection != "已连接" -> warningColor to connection
+    remoteDeleted -> warningColor to "服务端已删除 · 仅本地只读"
+    stateStatus == "connecting" -> primaryColor to "连接中…"
+    stateStatus == "working" -> primaryColor to "处理中…"
+    stateStatus == "waiting" -> warningColor to "等待确认"
+    stateStatus == "background" -> primaryColor to "后台运行中"
+    stateStatus == "failed" -> errorColor to "运行中断"
+    stateStatus in setOf("", "idle", "Idle") -> successColor to "已连接"
+    else -> (if (running) primaryColor else warningColor) to stateStatus
+}
+
+@Composable
+private fun DrawerNavItem(
+    icon: ImageVector,
+    label: String,
+    badgeText: String?,
+    showDot: Boolean,
+    onClick: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = scheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+            color = scheme.onSurface,
+            modifier = Modifier.weight(1f),
+        )
+        if (badgeText != null) {
+            Surface(
+                color = scheme.primaryContainer,
+                contentColor = scheme.onPrimaryContainer,
+                shape = RoundedCornerShape(10.dp),
+            ) {
+                Text(
+                    text = badgeText,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                )
+            }
+        } else if (showDot) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(scheme.error),
+            )
+        }
     }
 }
 
 private sealed class TranscriptItem {
     abstract val key: String
+
     data class BlockItem(val block: com.deerflow.app.domain.DisplayBlock) : TranscriptItem() {
         override val key: String get() = block.key
     }
+
+    data class ToolGroupItem(val group: ToolGroup) : TranscriptItem() {
+        override val key: String get() = group.key
+    }
+
     data class ProposalItem(val proposal: SkillProposal) : TranscriptItem() {
         override val key: String get() = "proposal:${proposal.id}"
     }
@@ -547,18 +1082,32 @@ private sealed class TranscriptItem {
 @Composable
 private fun Transcript(
     state: ConversationState,
-    listState: androidx.compose.foundation.lazy.LazyListState,
-    itemCount: androidx.compose.runtime.MutableState<Int>,
+    listState: LazyListState,
+    itemCount: MutableState<Int>,
+    connected: Boolean,
+    connectionText: String,
     artifactHeaders: Map<String, String>,
-    resolveMessageFile: suspend (com.deerflow.app.domain.model.MessageFile) -> com.deerflow.app.domain.model.AgentArtifact,
-    resolveGeneratedImage: suspend (String, String?) -> com.deerflow.app.domain.model.AgentArtifact,
+    resolveMessageFile: suspend (MessageFile) -> AgentArtifact,
+    resolveGeneratedImage: suspend (String, String?) -> AgentArtifact,
     imageScopeKey: String,
     imageReloadKey: Any?,
     proposals: List<SkillProposal>,
     onViewProposal: (String) -> Unit,
+    onOpenSettings: () -> Unit,
+    onRefresh: () -> Unit,
+    onPickSuggestion: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val scheme = MaterialTheme.colorScheme
+    val scope = rememberCoroutineScope()
     var previousItemCount by itemCount
+    var expandedToolGroups by rememberSaveable(
+        state.threadId,
+        saver = listSaver(
+            save = { it.value.toList() },
+            restore = { mutableStateOf(it.toSet()) },
+        ),
+    ) { mutableStateOf(emptySet<String>()) }
 
     // Map each proposal ID to its anchor block index when first introduced in this thread session.
     val proposalAnchors = remember(state.threadId) { mutableMapOf<String, Int>() }
@@ -573,17 +1122,40 @@ private fun Transcript(
             (proposalAnchors[proposal.id] ?: state.blocks.size).coerceIn(0, state.blocks.size)
         }
 
+        val grouped = TranscriptGrouping.group(state.blocks)
         val result = mutableListOf<TranscriptItem>()
-        for (i in 0..state.blocks.size) {
-            proposalsByAnchor[i]?.sortedBy { it.createdAt }?.forEach { proposal ->
-                result.add(TranscriptItem.ProposalItem(proposal))
+        proposalsByAnchor[0]?.sortedBy { it.createdAt }?.forEach { proposal ->
+            result.add(TranscriptItem.ProposalItem(proposal))
+        }
+        grouped.forEach { entry ->
+            val anchorRange = when (entry) {
+                is GroupedTranscriptEntry.Single -> {
+                    result.add(TranscriptItem.BlockItem(entry.block))
+                    (entry.blockIndex + 1)..(entry.blockIndex + 1)
+                }
+                is GroupedTranscriptEntry.ToolCard -> {
+                    result.add(TranscriptItem.ToolGroupItem(entry.group))
+                    (entry.group.startBlockIndex + 1)..(entry.group.endBlockIndex + 1)
+                }
             }
-            if (i < state.blocks.size) {
-                result.add(TranscriptItem.BlockItem(state.blocks[i]))
+            for (anchorIndex in anchorRange) {
+                proposalsByAnchor[anchorIndex]?.sortedBy { it.createdAt }?.forEach { proposal ->
+                    result.add(TranscriptItem.ProposalItem(proposal))
+                }
             }
         }
         result
     }
+
+    val isAtBottom by remember(listState) {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            info.totalItemsCount == 0 || lastVisible >= info.totalItemsCount - 1
+        }
+    }
+
+    val lastBlockLength = state.blocks.lastOrNull()?.content?.length ?: 0
 
     LaunchedEffect(itemsList.size, state.threadId) {
         val currentItemCount = itemsList.size
@@ -592,64 +1164,156 @@ private fun Transcript(
         if (itemsWereAdded) listState.animateScrollToItem(currentItemCount - 1)
     }
 
+    LaunchedEffect(lastBlockLength, state.running) {
+        if (state.running && isAtBottom && itemsList.isNotEmpty()) {
+            listState.scrollToItem(itemsList.lastIndex)
+        }
+    }
+
     if (itemsList.isEmpty()) {
+        val suggestions = remember {
+            listOf(
+                "梳理当前项目结构与核心模块",
+                "总结一份会议纪要并提取待办事项",
+                "帮我排查一段日志或报错原因",
+            )
+        }
         Column(
-            modifier = modifier.fillMaxSize().padding(horizontal = 24.dp),
+            modifier = modifier
+                .fillMaxSize()
+                .padding(horizontal = 24.dp),
             verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Image(
                 painter = painterResource(id = R.drawable.deerflow_logo),
                 contentDescription = "DeerFlow Logo",
                 modifier = Modifier
-                    .size(130.dp)
-                    .clip(RoundedCornerShape(28.dp))
+                    .size(64.dp)
+                    .clip(RoundedCornerShape(18.dp)),
             )
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
             Text(
-                text = "DeerFlow",
+                text = "有什么可以帮你的？",
                 style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onBackground
+                color = scheme.onBackground,
+                textAlign = TextAlign.Center,
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "No messages yet. Type to start.",
+                text = if (connected) "输入你的任务目标，Agent 将在服务端为你分析与执行。" else connectionText.ifBlank { "请先配置并连接 Waku 服务器" },
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+                color = scheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
             )
+            Spacer(modifier = Modifier.height(22.dp))
+
+            if (!connected) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = onOpenSettings,
+                        shape = RoundedCornerShape(12.dp),
+                    ) { Text("前往连接设置") }
+                    OutlinedButton(
+                        onClick = onRefresh,
+                        shape = RoundedCornerShape(12.dp),
+                    ) { Text("重新同步") }
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth().widthIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    suggestions.forEach { prompt ->
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onPickSuggestion(prompt) },
+                            shape = RoundedCornerShape(14.dp),
+                            color = scheme.surfaceContainerLow,
+                            border = BorderStroke(1.dp, scheme.outlineVariant),
+                        ) {
+                            Text(
+                                text = prompt,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = scheme.onSurface,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            )
+                        }
+                    }
+                }
+            }
         }
         return
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 12.dp),
-    ) {
-        items(itemsList, key = { "$imageScopeKey:${it.key}" }) { item ->
-            when (item) {
-                is TranscriptItem.BlockItem -> {
-                    val isLastBlock = state.blocks.lastOrNull()?.key == item.block.key
-                    val streamingKind = item.block.kind in STREAMING_KINDS
-                    val isStreaming = state.running && isLastBlock && streamingKind
-                    BlockCard(
-                        block = item.block,
-                        artifactHeaders = artifactHeaders,
-                        isStreaming = isStreaming,
-                        resolveMessageFile = resolveMessageFile,
-                        resolveGeneratedImage = { reference -> resolveGeneratedImage(reference, item.block.messageId) },
-                        imageReloadKey = imageReloadKey,
+    Box(modifier = modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 20.dp),
+        ) {
+            items(itemsList, key = { "$imageScopeKey:${it.key}" }) { item ->
+                when (item) {
+                    is TranscriptItem.BlockItem -> {
+                        val isLastBlock = state.blocks.lastOrNull()?.key == item.block.key
+                        val streamingKind = item.block.kind in STREAMING_KINDS
+                        val isStreaming = state.running && isLastBlock && streamingKind
+                        BlockCard(
+                            block = item.block,
+                            artifactHeaders = artifactHeaders,
+                            isStreaming = isStreaming,
+                            resolveMessageFile = resolveMessageFile,
+                            resolveGeneratedImage = { reference -> resolveGeneratedImage(reference, item.block.messageId) },
+                            imageReloadKey = imageReloadKey,
+                        )
+                    }
+                    is TranscriptItem.ToolGroupItem -> {
+                        val groupKey = item.group.key
+                        ToolGroupCard(
+                            group = item.group,
+                            expanded = groupKey in expandedToolGroups,
+                            onToggle = {
+                                expandedToolGroups = if (groupKey in expandedToolGroups) {
+                                    expandedToolGroups - groupKey
+                                } else {
+                                    expandedToolGroups + groupKey
+                                }
+                            },
+                        )
+                    }
+                    is TranscriptItem.ProposalItem -> ProposalCard(
+                        proposal = item.proposal,
+                        compact = true,
+                        onView = { onViewProposal(item.proposal.id) },
                     )
                 }
-                is TranscriptItem.ProposalItem -> ProposalCard(
-                    proposal = item.proposal,
-                    compact = true,
-                    onView = { onViewProposal(item.proposal.id) },
-                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = itemsList.isNotEmpty() && !isAtBottom,
+            enter = fadeIn() + scaleIn(),
+            exit = fadeOut() + scaleOut(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+        ) {
+            SmallFloatingActionButton(
+                onClick = {
+                    scope.launch {
+                        if (itemsList.isNotEmpty()) listState.animateScrollToItem(itemsList.lastIndex)
+                    }
+                },
+                shape = CircleShape,
+                containerColor = scheme.surfaceContainerHigh,
+                contentColor = scheme.onSurface,
+            ) {
+                Icon(Icons.Default.KeyboardArrowDown, contentDescription = "回到底部")
             }
         }
     }
@@ -658,44 +1322,11 @@ private fun Transcript(
 private const val MAX_THREAD_PROPOSAL_CARDS = 3
 
 private val STREAMING_KINDS = setOf(
-    com.deerflow.app.domain.BlockKind.ASSISTANT,
-    com.deerflow.app.domain.BlockKind.TOOL,
-    com.deerflow.app.domain.BlockKind.THINKING,
-    com.deerflow.app.domain.BlockKind.REASONING,
+    BlockKind.ASSISTANT,
+    BlockKind.TOOL,
+    BlockKind.THINKING,
+    BlockKind.REASONING,
 )
-
-@Composable
-private fun StatusBar(state: ConversationState) {
-    val scheme = MaterialTheme.colorScheme
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween
-    ) {
-        Row(modifier = Modifier.weight(1f).padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            val statusColor = if (state.running) scheme.primary else scheme.onSurface.copy(alpha = 0.35f)
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .background(statusColor, shape = CircleShape)
-            )
-            Spacer(Modifier.width(6.dp))
-            Text(
-                text = state.status,
-                style = MaterialTheme.typography.labelSmall,
-                color = scheme.onSurface.copy(alpha = 0.7f)
-            )
-        }
-        Text(
-            text = "msgs: ${state.messageCount}  -  ${state.threadId.take(12)}",
-            maxLines = 1,
-            style = MaterialTheme.typography.labelSmall,
-            color = scheme.onSurface.copy(alpha = 0.4f)
-        )
-    }
-}
 
 @Composable
 private fun InputBar(
@@ -704,6 +1335,8 @@ private fun InputBar(
     canSend: Boolean,
     editable: Boolean,
     text: String,
+    allowFocusState: MutableState<Boolean>,
+    onRejectUnrequestedFocus: () -> Unit,
     onTextChanged: (String) -> Unit,
     attachments: List<PendingAttachment>,
     onOssChanged: (Boolean) -> Unit,
@@ -713,284 +1346,193 @@ private fun InputBar(
     onTakePhoto: () -> Unit,
     onRemoveAttachment: (PendingAttachment) -> Unit,
 ) {
-    var toolsExpanded by remember { mutableStateOf(false) }
-    val placeholder = if (awaitingInterrupt) "Reply to interrupt..." else "Type a message..."
+    val placeholder = if (awaitingInterrupt) "回复中断提示…" else "给 DeerFlow 发消息…"
     val scheme = MaterialTheme.colorScheme
     val canAttach = editable && !running && !awaitingInterrupt
-    val context = LocalContext.current
-
-    fun appendSpeechText(spokenText: String) {
-        val trimmed = spokenText.trim()
-        if (trimmed.isNotEmpty()) {
-            onTextChanged(if (text.isBlank()) trimmed else "${text.trimEnd()} $trimmed")
-        }
-    }
-
-    val speechInputLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult(),
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            val spokenText = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-                .orEmpty()
-            appendSpeechText(spokenText)
-        }
-    }
-
-    fun requestSpeechInput() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak now")
-        }
-        val canHandleSpeechInput = intent.resolveActivity(context.packageManager) != null
-        if (!canHandleSpeechInput) {
-            Toast.makeText(context, "Speech recognition is not available", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        try {
-            speechInputLauncher.launch(intent)
-        } catch (_: ActivityNotFoundException) {
-            Toast.makeText(context, "Speech recognition is not available", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    LaunchedEffect(canAttach) {
-        if (!canAttach) toolsExpanded = false
-    }
+    var isFocused by remember { mutableStateOf(false) }
 
     fun send() {
         val t = text.trim()
         val hasPayload = if (awaitingInterrupt) t.isNotEmpty() else t.isNotEmpty() || attachments.isNotEmpty()
         if (hasPayload && canSend && !running) {
-            if (!onSubmit(t, if (awaitingInterrupt) emptyList() else attachments)) return
-
-            toolsExpanded = false
+            onSubmit(t, if (awaitingInterrupt) emptyList() else attachments)
         }
     }
 
-    Column(
+    Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(22.dp),
+        color = scheme.surfaceContainerLow,
+        border = BorderStroke(
+            width = 1.dp,
+            color = if (isFocused) scheme.primary.copy(alpha = 0.7f) else scheme.outlineVariant,
+        ),
     ) {
-        if (attachments.isNotEmpty() && !awaitingInterrupt) {
-            AttachmentRow(
-                attachments = attachments,
-                onRemoveAttachment = onRemoveAttachment,
-                modifier = Modifier.padding(bottom = 8.dp),
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("上传到", style = MaterialTheme.typography.labelMedium)
-                FilterChip(selected = attachments.none { it.uploadToOss }, onClick = { onOssChanged(false) },
-                    enabled = editable && !running, label = { Text("服务器") })
-                FilterChip(selected = attachments.all { it.uploadToOss }, onClick = { onOssChanged(true) },
-                    enabled = editable && !running, label = { Text("OSS") })
-            }
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            if (!awaitingInterrupt) {
-                IconButton(
-                    onClick = { toolsExpanded = !toolsExpanded },
-                    enabled = canAttach,
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (toolsExpanded) scheme.primaryContainer else scheme.surfaceVariant,
-                        contentColor = if (toolsExpanded) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
-                    ),
-                    modifier = Modifier.size(44.dp),
+            if (attachments.isNotEmpty() && !awaitingInterrupt) {
+                AttachmentRow(
+                    attachments = attachments,
+                    onRemoveAttachment = onRemoveAttachment,
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "More input options",
-                        modifier = Modifier.size(20.dp),
+                    Text("上传至", style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
+                    FilterChip(
+                        selected = attachments.none { it.uploadToOss },
+                        onClick = { onOssChanged(false) },
+                        enabled = editable && !running,
+                        label = { Text("服务器") },
+                    )
+                    FilterChip(
+                        selected = attachments.all { it.uploadToOss },
+                        onClick = { onOssChanged(true) },
+                        enabled = editable && !running,
+                        label = { Text("OSS") },
                     )
                 }
             }
 
-            OutlinedTextField(
-                value = text,
-                onValueChange = onTextChanged,
-                enabled = editable,
-                modifier = Modifier.weight(1f),
-                placeholder = {
-                    Text(
-                        placeholder,
-                        color = scheme.onSurface.copy(alpha = 0.4f)
-                    )
-                },
-                maxLines = 4,
-                shape = RoundedCornerShape(24.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = scheme.primary.copy(alpha = 0.8f),
-                    unfocusedBorderColor = scheme.outline.copy(alpha = 0.4f),
-                    focusedContainerColor = scheme.surface,
-                    unfocusedContainerColor = scheme.surface,
-                    focusedTextColor = scheme.onSurface,
-                    unfocusedTextColor = scheme.onSurface
-                ),
-                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSend = { send() }),
-            )
-
-            val speechEnabled = editable && !running
-            IconButton(
-                onClick = { requestSpeechInput() },
-                enabled = speechEnabled,
-                colors = IconButtonDefaults.iconButtonColors(
-                    containerColor = scheme.surfaceVariant,
-                    contentColor = scheme.onSurfaceVariant,
-                    disabledContainerColor = scheme.surfaceVariant.copy(alpha = 0.55f),
-                    disabledContentColor = scheme.onSurfaceVariant.copy(alpha = 0.35f),
-                ),
-                modifier = Modifier.size(44.dp),
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 24.dp, max = 144.dp),
+                contentAlignment = Alignment.CenterStart,
             ) {
-                Icon(
-                    imageVector = Icons.Default.Mic,
-                    contentDescription = "Start speech input",
-                    modifier = Modifier.size(20.dp),
+                if (text.isEmpty()) {
+                    Text(
+                        text = placeholder,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = scheme.onSurfaceVariant.copy(alpha = 0.65f),
+                    )
+                }
+                BasicTextField(
+                    value = text,
+                    onValueChange = onTextChanged,
+                    enabled = editable,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
+                    cursorBrush = SolidColor(scheme.primary),
+                    maxLines = 6,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { send() }),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusProperties { canFocus = allowFocusState.value }
+                        .onFocusChanged { focusState ->
+                            isFocused = focusState.isFocused
+                            if (focusState.isFocused && !allowFocusState.value) {
+                                onRejectUnrequestedFocus()
+                            }
+                        }
+                        .pointerInput(editable) {
+                            awaitEachGesture {
+                                awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                                if (editable) allowFocusState.value = true
+                            }
+                        },
                 )
             }
 
-            if (running) {
-                IconButton(
-                    onClick = onCancel,
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = scheme.errorContainer,
-                        contentColor = scheme.onErrorContainer
-                    ),
-                    modifier = Modifier.size(48.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Stop,
-                        contentDescription = "Cancel run",
-                        modifier = Modifier.size(20.dp)
-                    )
+                    if (!awaitingInterrupt) {
+                        ComposerActionPill(
+                            icon = Icons.Default.AttachFile,
+                            label = "文件",
+                            enabled = canAttach,
+                            onClick = onPickFiles,
+                        )
+                        ComposerActionPill(
+                            icon = Icons.Default.PhotoCamera,
+                            label = "拍照",
+                            enabled = canAttach,
+                            onClick = onTakePhoto,
+                        )
+                    }
                 }
-            } else {
-                val sendEnabled = canSend && (text.trim().isNotEmpty() || attachments.isNotEmpty())
-                IconButton(
-                    onClick = { send() },
-                    enabled = sendEnabled,
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (sendEnabled) scheme.primary else scheme.surfaceVariant,
-                        contentColor = if (sendEnabled) scheme.onPrimary else scheme.onSurfaceVariant.copy(alpha = 0.4f)
-                    ),
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Send",
-                        modifier = Modifier.size(20.dp)
-                    )
+
+                if (running) {
+                    IconButton(
+                        onClick = onCancel,
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = scheme.errorContainer,
+                            contentColor = scheme.onErrorContainer,
+                        ),
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Stop,
+                            contentDescription = "停止生成",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                } else {
+                    val sendEnabled = canSend && (text.trim().isNotEmpty() || attachments.isNotEmpty())
+                    IconButton(
+                        onClick = { send() },
+                        enabled = sendEnabled,
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = if (sendEnabled) scheme.primary else scheme.surfaceContainerHigh,
+                            contentColor = if (sendEnabled) scheme.onPrimary else scheme.onSurfaceVariant.copy(alpha = 0.45f),
+                            disabledContainerColor = scheme.surfaceContainerHigh,
+                            disabledContentColor = scheme.onSurfaceVariant.copy(alpha = 0.45f),
+                        ),
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowUpward,
+                            contentDescription = "发送消息",
+                            modifier = Modifier.size(19.dp),
+                        )
+                    }
                 }
             }
         }
-
-        if (toolsExpanded && canAttach) {
-            AttachmentToolPanel(
-                onPickFiles = {
-                    toolsExpanded = false
-                    onPickFiles()
-                },
-                onTakePhoto = {
-                    toolsExpanded = false
-                    onTakePhoto()
-                },
-                modifier = Modifier.padding(top = 10.dp),
-            )
-        }
     }
 }
 
 @Composable
-private fun AttachmentToolPanel(
-    onPickFiles: () -> Unit,
-    onTakePhoto: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val scheme = MaterialTheme.colorScheme
-    Column(
-        modifier = modifier.fillMaxWidth(),
-    ) {
-        HorizontalDivider(color = scheme.outline.copy(alpha = 0.16f))
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 12.dp, bottom = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            InputToolButton(
-                label = "Upload",
-                icon = {
-                    Icon(
-                        imageVector = Icons.Default.AttachFile,
-                        contentDescription = null,
-                        modifier = Modifier.size(22.dp),
-                    )
-                },
-                onClick = onPickFiles,
-                modifier = Modifier.weight(1f),
-            )
-            InputToolButton(
-                label = "Camera",
-                icon = {
-                    Icon(
-                        imageVector = Icons.Default.PhotoCamera,
-                        contentDescription = null,
-                        modifier = Modifier.size(22.dp),
-                    )
-                },
-                onClick = onTakePhoto,
-                modifier = Modifier.weight(1f),
-            )
-        }
-    }
-}
-
-@Composable
-private fun InputToolButton(
+private fun ComposerActionPill(
+    icon: ImageVector,
     label: String,
-    icon: @Composable () -> Unit,
+    enabled: Boolean,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(scheme.surfaceVariant.copy(alpha = 0.75f))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    Surface(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(enabled = enabled, onClick = onClick),
+        shape = RoundedCornerShape(10.dp),
+        color = scheme.surfaceContainer,
+        contentColor = if (enabled) scheme.onSurfaceVariant else scheme.onSurfaceVariant.copy(alpha = 0.4f),
     ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .background(scheme.surface, CircleShape),
-            contentAlignment = Alignment.Center,
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
         ) {
-            icon()
+            Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(16.dp))
+            Text(text = label, style = MaterialTheme.typography.labelMedium)
         }
-        Spacer(Modifier.width(10.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Medium,
-            color = scheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AttachmentRow(
     attachments: List<PendingAttachment>,
@@ -1004,9 +1546,17 @@ private fun AttachmentRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         attachments.forEach { attachment ->
+            val isImage = attachment.mimeType?.startsWith("image/") == true
             InputChip(
                 selected = false,
                 onClick = {},
+                leadingIcon = {
+                    Icon(
+                        imageVector = if (isImage) Icons.Default.Image else Icons.Default.AttachFile,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
+                    )
+                },
                 label = {
                     Text(
                         text = attachment.displayName,
@@ -1021,7 +1571,7 @@ private fun AttachmentRow(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
-                            contentDescription = "Remove attachment",
+                            contentDescription = "移除附件",
                             modifier = Modifier.size(14.dp),
                         )
                     }

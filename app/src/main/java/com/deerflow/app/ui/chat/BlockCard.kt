@@ -9,75 +9,83 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 import android.widget.Toast
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -85,32 +93,38 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
-import com.deerflow.app.domain.BlockKind
-import com.deerflow.app.domain.DisplayBlock
 import coil.compose.SubcomposeAsyncImage
 import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
+import com.deerflow.app.data.waku.WakuImageReference
+import com.deerflow.app.domain.BlockKind
+import com.deerflow.app.domain.DisplayBlock
+import com.deerflow.app.domain.ToolGroup
+import com.deerflow.app.domain.ToolGroupStatus
+import com.deerflow.app.domain.TranscriptGrouping
 import com.deerflow.app.domain.UserDisplayText
 import com.deerflow.app.domain.model.AgentArtifact
 import com.deerflow.app.domain.model.MessageFile
-import com.deerflow.app.data.waku.WakuImageReference
-import kotlin.math.roundToInt
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.deerflow.app.ui.theme.DeerflowSemanticColors
+import com.deerflow.app.ui.theme.deerflowColors
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-/** Renders one transcript block, styled by its kind, using a premium AI Chat aesthetic with Markdown. */
+/** Renders one transcript block in a clean, full-width AI agent document stream. */
 @Composable
 fun BlockCard(
     block: DisplayBlock,
@@ -122,75 +136,125 @@ fun BlockCard(
     imageReloadKey: Any? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val semantic = MaterialTheme.deerflowColors
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
+            .padding(vertical = 3.dp),
     ) {
         when (block.kind) {
             BlockKind.USER -> {
-                // User Message: Aligned Right, custom pill bubble
-                Card(
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .fillMaxWidth(0.85f),
-                    shape = RoundedCornerShape(16.dp, 16.dp, 2.dp, 16.dp),
-                    colors = CardDefaults.cardColors(containerColor = scheme.primaryContainer),
-                ) {
-                    Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
-                        MarkdownText(
-                            text = UserDisplayText.clean(block.content),
-                            textColor = scheme.onPrimaryContainer,
-                            artifactHeaders = artifactHeaders,
-                        )
-                        block.attachments.forEach { file ->
-                            Spacer(Modifier.height(6.dp))
-                            ArtifactCard(file.asArtifact(), autoPreview = file.isImage,
-                                resolve = resolveMessageFile?.let { resolver -> { resolver(file) } })
+                val cleaned = UserDisplayText.clean(block.content)
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val bubbleMaxWidth = maxWidth * 0.84f
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .widthIn(max = bubbleMaxWidth),
+                        shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
+                        color = semantic.userBubble,
+                        contentColor = semantic.onUserBubble,
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            if (cleaned.isNotBlank()) {
+                                MarkdownText(
+                                    text = cleaned,
+                                    textColor = semantic.onUserBubble,
+                                    artifactHeaders = artifactHeaders,
+                                )
+                            }
+                            block.attachments.forEach { file ->
+                                ArtifactCard(
+                                    artifact = file.asArtifact(),
+                                    autoPreview = file.isImage,
+                                    resolve = resolveMessageFile?.let { resolver -> { resolver(file) } },
+                                )
+                            }
                         }
                     }
                 }
             }
 
             BlockKind.ASSISTANT -> {
-                // Assistant Message: Aligned Left, clean surface bubble
                 val agentName = remember(block.header) {
                     val idx = block.header.indexOf("agent:")
-                    if (idx >= 0) block.header.substring(idx + 6).trim() else null
+                    if (idx >= 0) block.header.substring(idx + 6).trim().takeIf { it.isNotEmpty() } else null
+                }
+                val displayText = remember(block.content) { mapAssistantDisplayContent(block.content) }
+                val clipboard = LocalClipboardManager.current
+                var copied by remember(block.key) { mutableStateOf(false) }
+
+                LaunchedEffect(copied) {
+                    if (copied) {
+                        delay(1_500)
+                        copied = false
+                    }
                 }
 
                 Column(
                     modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .fillMaxWidth(0.85f)
+                        .fillMaxWidth()
+                        .padding(vertical = 2.dp),
                 ) {
                     if (agentName != null) {
-                        Text(
-                            text = agentName,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = scheme.primary,
-                            modifier = Modifier.padding(start = 8.dp, bottom = 4.dp)
+                        Surface(
+                            color = scheme.primaryContainer.copy(alpha = 0.7f),
+                            contentColor = scheme.onPrimaryContainer,
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.padding(bottom = 6.dp),
+                        ) {
+                            Text(
+                                text = agentName,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                            )
+                        }
+                    }
+                    if (displayText.isNotBlank()) {
+                        MarkdownText(
+                            text = displayText,
+                            textColor = scheme.onBackground,
+                            artifactHeaders = artifactHeaders,
+                            resolveGeneratedImage = resolveGeneratedImage,
+                            imageReloadKey = imageReloadKey,
                         )
                     }
-                    Card(
-                        shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 2.dp),
-                        colors = CardDefaults.cardColors(containerColor = scheme.secondary),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.15f))
-                    ) {
-                        Column(Modifier.padding(horizontal = 14.dp, vertical = 9.dp)) {
-                            MarkdownText(
-                                text = block.content,
-                                textColor = scheme.onSecondary,
-                                artifactHeaders = artifactHeaders,
-                                resolveGeneratedImage = resolveGeneratedImage,
-                                imageReloadKey = imageReloadKey,
-                            )
-                            if (isStreaming && block.content.isNotEmpty()) {
-                                TypingCursor(
-                                    color = scheme.onSecondary,
-                                    modifier = Modifier.padding(top = 2.dp),
+                    if (isStreaming && displayText.isNotEmpty()) {
+                        TypingCursor(
+                            color = scheme.primary,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    } else if (!isStreaming && displayText.isNotBlank()) {
+                        Row(
+                            modifier = Modifier.padding(top = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        clipboard.setText(AnnotatedString(displayText))
+                                        copied = true
+                                    }
+                                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                                    contentDescription = "复制回复",
+                                    tint = if (copied) semantic.success else scheme.onSurfaceVariant,
+                                    modifier = Modifier.size(14.dp),
+                                )
+                                Text(
+                                    text = if (copied) "已复制" else "复制",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (copied) semantic.success else scheme.onSurfaceVariant,
                                 )
                             }
                         }
@@ -199,69 +263,102 @@ fun BlockCard(
             }
 
             BlockKind.THINKING, BlockKind.REASONING -> {
-                // Reasoning/Thinking: Accordion Collapsible Box
                 var expanded by remember { mutableStateOf(false) }
                 val isThinking = block.kind == BlockKind.THINKING
-                val title = if (isThinking) "Thinking Process" else "Reasoning Output"
-                val icon = Icons.Default.Psychology
-                val accentColor = scheme.tertiary
-                val baseContainerColor = scheme.secondaryContainer.copy(alpha = 0.3f)
-                val streamingContainerColor = accentColor.copy(alpha = 0.18f)
-                val containerColor by animateColorAsState(
-                    targetValue = if (isStreaming) streamingContainerColor else baseContainerColor,
-                    animationSpec = tween(durationMillis = 400, easing = FastOutSlowInEasing),
-                    label = "thinkingBg",
+                val explicitHeading = remember(block.content) {
+                    TranscriptGrouping.extractExplicitReasoningHeading(block.content)
+                }
+                val title = when {
+                    isStreaming -> "正在思考…"
+                    explicitHeading != null -> explicitHeading
+                    isThinking -> "思考过程"
+                    else -> "推理过程"
+                }
+                val previewLine = remember(block.content, isStreaming, title) {
+                    extractThinkingPreview(block.content, isStreaming).takeIf { it != title }
+                }
+                val borderColor by animateColorAsState(
+                    targetValue = if (isStreaming) scheme.primary.copy(alpha = 0.45f) else scheme.outlineVariant,
+                    animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+                    label = "thinkingBorder",
                 )
 
-                Card(
+                Surface(
                     modifier = Modifier
-                        .align(Alignment.CenterStart)
                         .fillMaxWidth()
+                        .padding(vertical = 2.dp)
                         .animateContentSize(),
-                    colors = CardDefaults.cardColors(containerColor = containerColor),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.2f))
+                    shape = RoundedCornerShape(14.dp),
+                    color = scheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, borderColor),
                 ) {
                     Column {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { expanded = !expanded }
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                .then(if (block.content.isNotBlank()) Modifier.clickable { expanded = !expanded } else Modifier)
+                                .padding(horizontal = 14.dp, vertical = 11.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                StreamingIcon(
-                                    isStreaming = isStreaming,
-                                    staticIcon = icon,
-                                    tint = accentColor,
-                                    contentDescription = title,
-                                )
-                                Spacer(Modifier.width(8.dp))
+                            StreamingIcon(
+                                isStreaming = isStreaming,
+                                staticIcon = Icons.Default.Psychology,
+                                tint = if (isStreaming) scheme.primary else scheme.tertiary,
+                                contentDescription = title,
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = title,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = scheme.onSecondaryContainer,
-                                    fontWeight = FontWeight.Medium
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = scheme.onSurface,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                if (!expanded && previewLine != null) {
+                                    Text(
+                                        text = previewLine,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = scheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            if (block.content.isNotBlank()) {
+                                Icon(
+                                    imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = if (expanded) "收起思考过程" else "展开思考过程",
+                                    tint = scheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp),
                                 )
                             }
-                            Icon(
-                                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-                                contentDescription = "Toggle",
-                                tint = scheme.onSecondaryContainer.copy(alpha = 0.7f),
-                                modifier = Modifier.size(20.dp)
-                            )
                         }
 
                         if (expanded && block.content.isNotBlank()) {
-                            HorizontalDivider(color = scheme.outline.copy(alpha = 0.15f))
-                            SelectionContainer {
-                                Text(
-                                    text = block.content,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = scheme.onSecondaryContainer.copy(alpha = 0.85f),
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f))
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(IntrinsicSize.Min)
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(2.dp)
+                                        .fillMaxHeight()
+                                        .clip(RoundedCornerShape(1.dp))
+                                        .background(scheme.tertiary.copy(alpha = 0.45f)),
                                 )
+                                Spacer(Modifier.width(10.dp))
+                                SelectionContainer(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = block.content,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = scheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         }
                     }
@@ -273,26 +370,29 @@ fun BlockCard(
                 val failed = tool?.isError == true
                 val running = tool?.isRunning == true && !failed
                 val name = tool?.name?.trim()?.takeIf { it.isNotEmpty() } ?: "工具调用"
-                val accent = if (failed) scheme.error else scheme.primary
-                Card(
-                    modifier = Modifier.align(Alignment.CenterStart).fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor =
-                        if (failed) scheme.errorContainer.copy(alpha = 0.22f)
-                        else scheme.surfaceVariant.copy(alpha = 0.25f)),
+                val accent = when {
+                    failed -> scheme.error
+                    running -> scheme.primary
+                    else -> semantic.success
+                }
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (failed) scheme.errorContainer.copy(alpha = 0.25f) else scheme.surfaceContainerLow,
+                    border = BorderStroke(1.dp, if (failed) scheme.error.copy(alpha = 0.4f) else scheme.outlineVariant),
                 ) {
                     Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         if (running) {
-                            CircularProgressIndicator(Modifier.size(18.dp), color = accent, strokeWidth = 2.dp)
+                            CircularProgressIndicator(Modifier.size(16.dp), color = accent, strokeWidth = 2.dp)
                         } else {
                             Icon(
                                 imageVector = if (failed) Icons.Default.Warning else Icons.Default.Build,
                                 contentDescription = null,
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(16.dp),
                                 tint = if (failed) accent else scheme.onSurfaceVariant,
                             )
                         }
@@ -301,12 +401,17 @@ fun BlockCard(
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
+                            color = scheme.onSurface,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
                         if (tool != null) {
                             Text(
-                                text = when { failed -> "失败"; running -> "运行中"; else -> "已完成" },
+                                text = when {
+                                    failed -> "失败"
+                                    running -> "调用中"
+                                    else -> "已完成"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (failed || running) accent else scheme.onSurfaceVariant,
                             )
@@ -317,9 +422,7 @@ fun BlockCard(
 
             BlockKind.ARTIFACT -> {
                 Column(
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .fillMaxWidth(0.85f),
+                    modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     block.artifacts.forEach { artifact ->
@@ -329,39 +432,40 @@ fun BlockCard(
             }
 
             BlockKind.INTERRUPT, BlockKind.ERROR -> {
-                // Warning/Alert/Interrupt Card
                 val isError = block.kind == BlockKind.ERROR
-                val borderCol = if (isError) scheme.error else scheme.tertiary
+                val containerCol = if (isError) scheme.errorContainer else semantic.warningContainer
+                val borderCol = if (isError) scheme.error else semantic.warning
+                val textCol = if (isError) scheme.onErrorContainer else semantic.onWarningContainer
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = scheme.errorContainer),
-                    border = androidx.compose.foundation.BorderStroke(1.5.dp, borderCol)
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = containerCol),
+                    border = BorderStroke(1.dp, borderCol.copy(alpha = 0.6f)),
                 ) {
-                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
                                 imageVector = if (isError) Icons.Default.Warning else Icons.Default.Info,
-                                contentDescription = "Alert",
+                                contentDescription = null,
                                 tint = borderCol,
-                                modifier = Modifier.size(20.dp)
+                                modifier = Modifier.size(18.dp),
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 text = block.header,
                                 style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isError) scheme.onErrorContainer else scheme.onTertiaryContainer
+                                fontWeight = FontWeight.SemiBold,
+                                color = textCol,
                             )
                         }
                         if (block.content.isNotBlank()) {
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(6.dp))
                             SelectionContainer {
                                 Text(
                                     text = block.content,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (isError) scheme.onErrorContainer.copy(alpha = 0.9f) else scheme.onTertiaryContainer.copy(alpha = 0.9f)
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = textCol.copy(alpha = 0.92f),
                                 )
                             }
                         }
@@ -370,17 +474,269 @@ fun BlockCard(
             }
 
             BlockKind.SYSTEM -> {
-                // System Badge: Minimal Centered Info Text
                 SelectionContainer {
                     Text(
                         text = "${block.header}: ${block.content}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = scheme.onSurface.copy(alpha = 0.35f),
+                        color = scheme.onSurfaceVariant.copy(alpha = 0.75f),
                         textAlign = TextAlign.Center,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 4.dp, horizontal = 16.dp)
+                            .padding(vertical = 4.dp, horizontal = 16.dp),
                     )
+                }
+            }
+        }
+    }
+}
+
+private fun mapAssistantDisplayContent(raw: String): String = when (raw) {
+    "The turn completed without a text response." -> "本轮处理已完成（无额外文字回复）。"
+    "The turn stopped before a response." -> "处理在生成回复前已停止。"
+    else -> raw
+}
+
+private fun extractThinkingPreview(raw: String, isStreaming: Boolean): String? {
+    val lines = raw.lineSequence()
+        .map { it.trim().trimStart('#', '*', '-', ' ').trimEnd('*').trim() }
+        .filter { it.isNotEmpty() }
+        .toList()
+    return if (isStreaming) lines.lastOrNull() else lines.firstOrNull()
+}
+
+@Composable
+fun ToolGroupCard(
+    group: ToolGroup,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val semantic = MaterialTheme.deerflowColors
+    val isRunning = group.status == ToolGroupStatus.RUNNING
+    val isFailed = group.status == ToolGroupStatus.FAILED
+    val dotAlpha = if (isRunning) {
+        val transition = rememberInfiniteTransition(label = "toolGroupDotPulse")
+        val animated by transition.animateFloat(
+            initialValue = 0.35f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 900, easing = FastOutSlowInEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "toolGroupDotAlpha",
+        )
+        animated
+    } else {
+        1f
+    }
+    val dotColor = when (group.status) {
+        ToolGroupStatus.RUNNING -> scheme.primary.copy(alpha = dotAlpha)
+        ToolGroupStatus.FAILED -> scheme.error
+        ToolGroupStatus.COMPLETED -> semantic.success
+    }
+    val borderColor = if (isFailed) scheme.error.copy(alpha = 0.45f) else scheme.outlineVariant
+    val containerColor = if (isFailed) scheme.errorContainer.copy(alpha = 0.22f) else scheme.surfaceContainerLow
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp)
+            .animateContentSize(),
+        shape = RoundedCornerShape(14.dp),
+        color = containerColor,
+        border = BorderStroke(1.dp, borderColor),
+    ) {
+        Column(
+            modifier = if (group.expandable) Modifier.clickable(onClick = onToggle) else Modifier,
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(dotColor),
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    text = group.taskTitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = scheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (group.expandable) {
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = if (expanded) "收起工具列表" else "展开工具列表",
+                        tint = scheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+
+            if (!expanded) {
+                val featured = group.featuredTool
+                val statusText = when {
+                    featured.isRunning -> "调用中"
+                    featured.isError -> "失败"
+                    else -> "已完成"
+                }
+                val statusColor = when {
+                    featured.isRunning -> scheme.primary
+                    featured.isError -> scheme.error
+                    else -> scheme.onSurfaceVariant
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 14.dp, end = 14.dp, bottom = 11.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = featured.name,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = scheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        featured.agentName?.let { agent ->
+                            Text(
+                                text = agent,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = scheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = statusText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = statusColor,
+                        )
+                        if (group.expandable) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(scheme.surfaceContainerHigh)
+                                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                            ) {
+                                Text(
+                                    text = "共 ${group.tools.size} 项",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (expanded && group.expandable) {
+                HorizontalDivider(color = scheme.outlineVariant.copy(alpha = 0.5f))
+                val listModifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (group.tools.size > 8) {
+                            Modifier
+                                .heightIn(max = 320.dp)
+                                .verticalScroll(rememberScrollState())
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                Column(
+                    modifier = listModifier,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    group.tools.forEach { step ->
+                        val stepStatusText = when {
+                            step.isRunning -> "调用中"
+                            step.isError -> "失败"
+                            else -> "已完成"
+                        }
+                        val stepStatusColor = when {
+                            step.isRunning -> scheme.primary
+                            step.isError -> scheme.error
+                            else -> scheme.onSurfaceVariant
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            when {
+                                step.isRunning -> CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    color = scheme.primary,
+                                    strokeWidth = 1.8.dp,
+                                )
+                                step.isError -> Icon(
+                                    imageVector = Icons.Default.Warning,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                    tint = scheme.error,
+                                )
+                                else -> Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                    tint = semantic.success,
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = step.name,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = scheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f, fill = false),
+                                )
+                                step.agentName?.let { agent ->
+                                    Text(
+                                        text = agent,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = scheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                            Text(
+                                text = stepStatusText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = stepStatusColor,
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -412,10 +768,12 @@ internal fun ArtifactCard(
         }?.let { return it }
         return (currentResolve?.invoke() ?: artifact).also { resolved = it }
     }
+
     fun action(kind: String) {
         if (busy != null) return
         scope.launch {
-            busy = kind; failure = null
+            busy = kind
+            failure = null
             try {
                 val file = content()
                 when (kind) {
@@ -435,95 +793,192 @@ internal fun ArtifactCard(
                     }
                     else -> {
                         val uri = downloadArtifact(context, file, headers)
-                        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
-                            setDataAndType(uri, file.mimeType ?: "application/octet-stream")
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        })
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, file.mimeType ?: "application/octet-stream")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            },
+                        )
                     }
                 }
-            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (_: ActivityNotFoundException) { failure = "没有可打开此文件的应用，请先保存文件" }
-            catch (error: Exception) { failure = error.message ?: "文件读取失败，请重试" }
-            finally { busy = null }
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (_: ActivityNotFoundException) {
+                failure = "没有可打开此文件的应用，请先保存文件"
+            } catch (error: Exception) {
+                failure = error.message ?: "文件读取失败，请重试"
+            } finally {
+                busy = null
+            }
         }
     }
+
     LaunchedEffect(artifact.path, artifact.url, autoPreview, reloadKey) {
         if (autoPreview && isImage) {
-            busy = "图片加载中…"; failure = null
-            try { content() }
-            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (error: Exception) { failure = "图片暂未加载，点击重试。" + error.message.orEmpty() }
-            finally { busy = null }
+            busy = "图片加载中…"
+            failure = null
+            try {
+                content()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                failure = "图片暂未加载，点击重试。" + error.message.orEmpty()
+            } finally {
+                busy = null
+            }
         }
     }
+
     val shown = resolved ?: artifact
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(enabled = busy == null) {
-            action(if (isImage) "预览中…" else "打开中…")
-        },
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = scheme.secondary),
-        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outline.copy(alpha = 0.25f)),
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(enabled = busy == null) {
+                action(if (isImage) "预览中…" else "打开中…")
+            },
+        shape = RoundedCornerShape(14.dp),
+        color = scheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, scheme.outlineVariant),
     ) {
         Column(Modifier.padding(10.dp)) {
             if (isImage && resolved != null) {
-                NetworkImage(model = authenticatedImageRequest(context, shown.url, headers),
-                    contentDescription = shown.name, contentScale = previewContentScale,
-                    modifier = Modifier.fillMaxWidth().height(180.dp).clip(RoundedCornerShape(8.dp)).background(scheme.surfaceVariant))
+                NetworkImage(
+                    model = authenticatedImageRequest(context, shown.url, headers),
+                    contentDescription = shown.name,
+                    contentScale = previewContentScale,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(190.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(scheme.surfaceContainer),
+                )
                 Spacer(Modifier.height(8.dp))
             } else if (isImage && autoPreview) {
-                Box(Modifier.fillMaxWidth().height(180.dp).background(scheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(190.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(scheme.surfaceContainer),
+                    contentAlignment = Alignment.Center,
+                ) {
                     if (busy != null) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            CircularProgressIndicator(Modifier.size(24.dp))
-                            Text("正在加载图片…", style = MaterialTheme.typography.bodySmall)
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                            Text("正在加载图片…", style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant)
                         }
-                    } else ImageLoadState("图片加载失败，点击重试")
+                    } else {
+                        ImageLoadState("图片加载失败，点击重试")
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
             }
+
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(if (isImage) Icons.Default.Image else Icons.Default.AttachFile, null,
-                    tint = scheme.primary, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(scheme.primaryContainer.copy(alpha = 0.65f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = if (isImage) Icons.Default.Image else Icons.Default.AttachFile,
+                        contentDescription = null,
+                        tint = scheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(artifact.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
-                        maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Text(busy ?: listOfNotNull(shown.mimeType, shown.size?.let { formatFileSize(it) }).joinToString(" · "),
-                        style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        text = artifact.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = scheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = busy ?: listOfNotNull(shown.mimeType, shown.size?.let { formatFileSize(it) }).joinToString(" · "),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
-                androidx.compose.material3.IconButton(onClick = { action("分享中…") }, enabled = busy == null) {
-                    Icon(Icons.Default.Share, "分享文件")
+                IconButton(
+                    onClick = { action("分享中…") },
+                    enabled = busy == null,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = "分享文件", modifier = Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
                 }
-                androidx.compose.material3.IconButton(onClick = { action("保存中…") }, enabled = busy == null) {
-                    Icon(Icons.Default.Download, "保存文件")
+                IconButton(
+                    onClick = { action("保存中…") },
+                    enabled = busy == null,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = "保存文件", modifier = Modifier.size(18.dp), tint = scheme.onSurfaceVariant)
                 }
-                androidx.compose.material3.IconButton(onClick = { action(if (isImage) "预览中…" else "打开中…") }, enabled = busy == null) {
-                    Icon(Icons.AutoMirrored.Filled.OpenInNew, if (isImage) "预览图片" else "打开文件")
+                IconButton(
+                    onClick = { action(if (isImage) "预览中…" else "打开中…") },
+                    enabled = busy == null,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.OpenInNew,
+                        contentDescription = if (isImage) "预览图片" else "打开文件",
+                        modifier = Modifier.size(18.dp),
+                        tint = scheme.onSurfaceVariant,
+                    )
                 }
             }
-            if (busy != null) LinearProgressIndicator(Modifier.fillMaxWidth())
-            failure?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall) }
+            if (busy != null) {
+                Spacer(Modifier.height(6.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            failure?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
+
     if (previewOpen && isImage && resolved != null) {
-        AlertDialog(onDismissRequest = { previewOpen = false },
+        AlertDialog(
+            onDismissRequest = { previewOpen = false },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = scheme.surfaceContainerLow,
             confirmButton = { TextButton(onClick = { previewOpen = false }) { Text("关闭") } },
             dismissButton = {
                 Row {
-                    TextButton(onClick = { action("保存中…") }, enabled = busy == null) { Text(if (busy == "保存中…") "保存中…" else "保存") }
+                    TextButton(onClick = { action("保存中…") }, enabled = busy == null) {
+                        Text(if (busy == "保存中…") "保存中…" else "保存")
+                    }
                     TextButton(onClick = { action("打开中…") }, enabled = busy == null) { Text("外部打开") }
                 }
             },
-            title = { Text(shown.name, maxLines = 2) },
+            title = { Text(shown.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column {
-                    NetworkImage(model = authenticatedImageRequest(context, shown.url, headers),
-                        contentDescription = shown.name, contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxWidth().height(360.dp))
+                    NetworkImage(
+                        model = authenticatedImageRequest(context, shown.url, headers),
+                        contentDescription = shown.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(360.dp)
+                            .clip(RoundedCornerShape(10.dp)),
+                    )
                     failure?.let { Text(it, color = scheme.error, style = MaterialTheme.typography.bodySmall) }
                 }
-            })
+            },
+        )
     }
 }
 
@@ -544,7 +999,13 @@ private data class ArtifactSource(
     val length: Long? = null,
     val disconnect: () -> Unit = {},
 ) : java.io.Closeable {
-    override fun close() { try { input.close() } finally { disconnect() } }
+    override fun close() {
+        try {
+            input.close()
+        } finally {
+            disconnect()
+        }
+    }
 }
 
 private fun checkedCacheFile(context: Context, uri: Uri): File {
@@ -570,14 +1031,20 @@ private fun openArtifactSource(context: Context, url: String): ArtifactSource {
             try {
                 check(connection.responseCode in 200..299) { "HTTP ${connection.responseCode}" }
                 ArtifactSource(connection.inputStream, connection.contentLengthLong.takeIf { it > 0 }, connection::disconnect)
-            } catch (error: Throwable) { connection.disconnect(); throw error }
+            } catch (error: Throwable) {
+                connection.disconnect()
+                throw error
+            }
         }
         else -> error("附件尚未下载，请重新同步")
     }
 }
 
 private suspend fun downloadUrl(
-    context: Context, url: String, name: String, headers: Map<String, String>,
+    context: Context,
+    url: String,
+    name: String,
+    headers: Map<String, String>,
 ): Uri = withContext(Dispatchers.IO) {
     val uri = Uri.parse(url)
     if (uri.scheme == "file") {
@@ -590,13 +1057,20 @@ private suspend fun downloadUrl(
         openArtifactSource(context, url).use { source ->
             file.outputStream().use { output -> source.input.copyTo(output) }
         }
-    } catch (error: Throwable) { file.delete(); throw error }
+    } catch (error: Throwable) {
+        file.delete()
+        throw error
+    }
     FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
 }
 
 private suspend fun saveToDownloads(
-    context: Context, displayName: String, mime: String?, url: String,
-    authHeaders: Map<String, String>, onProgress: (Float) -> Unit,
+    context: Context,
+    displayName: String,
+    mime: String?,
+    url: String,
+    authHeaders: Map<String, String>,
+    onProgress: (Float) -> Unit,
 ): Uri = withContext(Dispatchers.IO) {
     val safeName = sanitizeArtifactFilename(displayName.ifBlank { "artifact" })
     openArtifactSource(context, url).use { source ->
@@ -635,12 +1109,15 @@ private suspend fun saveToDownloads(
                 values.clear()
                 values.put(MediaStore.Downloads.IS_PENDING, 0)
                 context.contentResolver.update(uri, values, null, null)
-            } else context.contentResolver.delete(uri, null, null)
+            } else {
+                context.contentResolver.delete(uri, null, null)
+            }
         }
         check(written) { "保存文件失败" }
         uri
     }
 }
+
 private fun guessMime(name: String): String {
     val ext = name.substringAfterLast('.', "").trim().lowercase()
     return if (ext.isNotEmpty()) MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
@@ -662,7 +1139,7 @@ private fun NetworkImage(
         modifier = modifier,
         loading = {
             Box(
-                modifier = Modifier.fillMaxSize().background(scheme.surfaceVariant),
+                modifier = Modifier.fillMaxSize().background(scheme.surfaceContainer),
                 contentAlignment = Alignment.Center,
             ) {
                 CircularProgressIndicator(
@@ -674,8 +1151,8 @@ private fun NetworkImage(
         },
         error = {
             ImageLoadState(
-                message = "Load failed",
-                modifier = Modifier.fillMaxSize().background(scheme.surfaceVariant),
+                message = "图片加载失败",
+                modifier = Modifier.fillMaxSize().background(scheme.surfaceContainer),
             )
         },
         success = { SubcomposeAsyncImageContent() },
@@ -716,6 +1193,7 @@ private fun authenticatedImageRequest(context: Context, url: String, headers: Ma
     }
     return ImageRequest.Builder(context).data(safeData).build()
 }
+
 private fun sanitizeArtifactFilename(name: String): String {
     val clean = name.substringAfterLast('/').substringAfterLast('\\').trim()
         .replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim(' ', '.').take(60)
@@ -733,6 +1211,8 @@ internal sealed class MarkdownBlock {
     data class CodeBlock(val language: String, val code: String) : MarkdownBlock()
     data class ImageBlock(val alt: String, val url: String) : MarkdownBlock()
     data class Table(val headers: List<String>, val rows: List<List<String>>) : MarkdownBlock()
+    data class BlockQuote(val text: String) : MarkdownBlock()
+    data object Divider : MarkdownBlock()
 }
 
 @Composable
@@ -745,113 +1225,197 @@ private fun MarkdownText(
     imageReloadKey: Any? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val semantic = MaterialTheme.deerflowColors
     val blocks = remember(text) { parseBlocks(text) }
+    val clipboard = LocalClipboardManager.current
 
     SelectionContainer {
-        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        blocks.forEachIndexed { index, block ->
-            when (block) {
-                is MarkdownBlock.CodeBlock -> {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = scheme.surfaceContainer),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.2f))
-                    ) {
-                        Column(Modifier.padding(10.dp)) {
-                            if (block.language.isNotEmpty()) {
-                                Text(
-                                    text = block.language.uppercase(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = scheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(bottom = 4.dp)
-                                )
+        Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            blocks.forEachIndexed { index, block ->
+                when (block) {
+                    is MarkdownBlock.CodeBlock -> {
+                        var copied by remember(index, block.code) { mutableStateOf(false) }
+                        LaunchedEffect(copied) {
+                            if (copied) {
+                                delay(1_500)
+                                copied = false
                             }
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState())
-                            ) {
-                                Text(
-                                    text = block.code,
-                                    fontFamily = FontFamily.Monospace,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = scheme.onSurfaceVariant
-                                )
+                        }
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp),
+                            color = semantic.codeSurface,
+                            border = BorderStroke(1.dp, scheme.outlineVariant),
+                        ) {
+                            Column {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(semantic.codeHeaderSurface)
+                                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Text(
+                                        text = block.language.ifBlank { "CODE" }.uppercase(),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = scheme.onSurfaceVariant,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                    Row(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .clickable {
+                                                clipboard.setText(AnnotatedString(block.code))
+                                                copied = true
+                                            }
+                                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Icon(
+                                            imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                                            contentDescription = "复制代码",
+                                            tint = if (copied) semantic.success else scheme.onSurfaceVariant,
+                                            modifier = Modifier.size(13.dp),
+                                        )
+                                        Text(
+                                            text = if (copied) "已复制" else "复制",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (copied) semantic.success else scheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState())
+                                        .padding(12.dp),
+                                ) {
+                                    Text(
+                                        text = block.code,
+                                        fontFamily = FontFamily.Monospace,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = scheme.onSurface,
+                                    )
+                                }
                             }
                         }
                     }
-                }
-                is MarkdownBlock.Header -> {
-                    val style = when (block.level) {
-                        1 -> MaterialTheme.typography.titleLarge
-                        2 -> MaterialTheme.typography.titleMedium
-                        else -> MaterialTheme.typography.titleSmall
-                    }
-                    Text(
-                        text = parseMarkdownInline(block.text, scheme),
-                        color = textColor,
-                        style = style,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
-                    )
-                }
-                is MarkdownBlock.ListItem -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(start = 6.dp),
-                        verticalAlignment = Alignment.Top
-                    ) {
+
+                    is MarkdownBlock.Header -> {
+                        val style = when (block.level) {
+                            1 -> MaterialTheme.typography.titleLarge
+                            2 -> MaterialTheme.typography.titleMedium
+                            else -> MaterialTheme.typography.titleSmall
+                        }
                         Text(
-                            text = if (block.ordered) "${block.index}. " else "• ",
-                            color = textColor.copy(alpha = 0.6f),
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = parseMarkdownInline(block.text, scheme),
+                            text = parseMarkdownInline(block.text, scheme, semantic),
                             color = textColor,
-                            style = MaterialTheme.typography.bodyLarge
+                            style = style,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
                         )
                     }
-                }
-                is MarkdownBlock.Paragraph -> {
-                    Text(
-                        text = parseMarkdownInline(block.text, scheme),
-                        color = textColor,
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                }
-                is MarkdownBlock.ImageBlock -> {
-                    key(index, block.url) {
-                        MarkdownImage(block, artifactHeaders, resolveGeneratedImage, imageReloadKey)
+
+                    is MarkdownBlock.ListItem -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(start = 6.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Text(
+                                text = if (block.ordered) "${block.index}. " else "• ",
+                                color = textColor.copy(alpha = 0.65f),
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = parseMarkdownInline(block.text, scheme, semantic),
+                                color = textColor,
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
                     }
-                }
-                is MarkdownBlock.Table -> {
-                    MarkdownTable(
-                        headers = block.headers,
-                        rows = block.rows,
-                        textColor = textColor
-                    )
+
+                    is MarkdownBlock.BlockQuote -> {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(IntrinsicSize.Min)
+                                .padding(vertical = 2.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(scheme.primary.copy(alpha = 0.55f)),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = parseMarkdownInline(block.text, scheme, semantic),
+                                color = textColor.copy(alpha = 0.82f),
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        }
+                    }
+
+                    MarkdownBlock.Divider -> {
+                        HorizontalDivider(
+                            color = scheme.outlineVariant,
+                            modifier = Modifier.padding(vertical = 4.dp),
+                        )
+                    }
+
+                    is MarkdownBlock.Paragraph -> {
+                        Text(
+                            text = parseMarkdownInline(block.text, scheme, semantic),
+                            color = textColor,
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    }
+
+                    is MarkdownBlock.ImageBlock -> {
+                        key(index, block.url) {
+                            MarkdownImage(block, artifactHeaders, resolveGeneratedImage, imageReloadKey)
+                        }
+                    }
+
+                    is MarkdownBlock.Table -> {
+                        MarkdownTable(
+                            headers = block.headers,
+                            rows = block.rows,
+                            textColor = textColor,
+                        )
+                    }
                 }
             }
-        }
         }
     }
 }
 
 @Composable
-private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, String>,
-    resolveGeneratedImage: (suspend (String) -> AgentArtifact)? = null, imageReloadKey: Any? = null) {
+private fun MarkdownImage(
+    block: MarkdownBlock.ImageBlock,
+    headers: Map<String, String>,
+    resolveGeneratedImage: (suspend (String) -> AgentArtifact)? = null,
+    imageReloadKey: Any? = null,
+) {
     if (block.url.startsWith("waku-blob:")) {
         val reference = remember(block.url) { WakuImageReference.parse(block.url) }
         if (reference == null) {
             Text("图片引用无效，请重新同步会话", color = MaterialTheme.colorScheme.error)
         } else {
-            ArtifactCard(artifact = reference.asArtifact(), autoPreview = true, reloadKey = imageReloadKey,
-                previewContentScale = ContentScale.Fit, resolve = {
+            ArtifactCard(
+                artifact = reference.asArtifact(),
+                autoPreview = true,
+                reloadKey = imageReloadKey,
+                previewContentScale = ContentScale.Fit,
+                resolve = {
                     val resolver = resolveGeneratedImage ?: error("当前消息的图片暂不可用")
                     resolver(reference.value)
-                })
+                },
+            )
         }
         return
     }
@@ -889,10 +1453,10 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
                 try {
                     context.startActivity(intent)
                 } catch (_: ActivityNotFoundException) {
-                    Toast.makeText(context, "No app can open this image", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "没有可打开此图片的应用", Toast.LENGTH_SHORT).show()
                 }
             }.onFailure { error ->
-                Toast.makeText(context, "Open failed: ${error.message}", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "打开失败：${error.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -915,9 +1479,9 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
             downloading = false
             downloadProgress = null
             result.onSuccess {
-                Toast.makeText(context, "Saved to Download/deerflow/", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "已保存到 Download/deerflow/", Toast.LENGTH_LONG).show()
             }.onFailure { error ->
-                Toast.makeText(context, "Save failed: ${error.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "保存失败：${error.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -928,32 +1492,34 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
         contentScale = ContentScale.Crop,
         modifier = Modifier
             .fillMaxWidth()
-            .height(180.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(scheme.surfaceVariant)
+            .height(190.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(scheme.surfaceContainer)
             .clickable { previewOpen = true },
     )
 
     if (previewOpen) {
         AlertDialog(
             onDismissRequest = { previewOpen = false },
-            confirmButton = { TextButton(onClick = { previewOpen = false }) { Text("Close") } },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = scheme.surfaceContainerLow,
+            confirmButton = { TextButton(onClick = { previewOpen = false }) { Text("关闭") } },
             dismissButton = {
                 Row {
                     TextButton(onClick = { save() }, enabled = !downloading) {
                         Text(
                             when {
-                                downloading -> downloadProgress?.let { "${(it * 100).roundToInt()}%" } ?: "..."
-                                else -> "Save"
-                            }
+                                downloading -> downloadProgress?.let { "${(it * 100).roundToInt()}%" } ?: "保存中…"
+                                else -> "保存"
+                            },
                         )
                     }
                     TextButton(onClick = { openExternal() }, enabled = !opening && !downloading) {
-                        Text(if (opening) "Opening..." else "Open")
+                        Text(if (opening) "打开中…" else "外部打开")
                     }
                 }
             },
-            title = { Text(block.alt.ifBlank { "Image" }, maxLines = 1) },
+            title = { Text(block.alt.ifBlank { "图片预览" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             text = {
                 Column {
                     NetworkImage(
@@ -963,8 +1529,8 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(360.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(scheme.surfaceVariant),
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(scheme.surfaceContainer),
                     )
                     if (downloading) {
                         Spacer(Modifier.height(8.dp))
@@ -983,7 +1549,7 @@ private fun MarkdownImage(block: MarkdownBlock.ImageBlock, headers: Map<String, 
     }
 }
 
-/** Check if a line looks like a markdown table row: starts and ends with | or contains | separators */
+/** Check if a line looks like a markdown table row: starts and ends with | */
 private fun isTableRow(line: String): Boolean {
     val t = line.trim()
     return t.startsWith("|") && t.endsWith("|") && t.length > 1
@@ -1006,6 +1572,7 @@ private fun parseTableCells(line: String): List<String> {
 }
 
 private val markdownImageRegex = Regex("!\\[([^\\]]*)\\]\\(([^)]+)\\)")
+private val markdownDividerRegex = Regex("^([-*_])\\1{2,}$")
 
 internal fun parseBlocks(text: String): List<MarkdownBlock> {
     val lines = text.split("\n")
@@ -1020,7 +1587,6 @@ internal fun parseBlocks(text: String): List<MarkdownBlock> {
     var inTable = false
     var tableHeaders = listOf<String>()
     val tableRows = mutableListOf<List<String>>()
-    var tableSeparatorSeen = false
 
     fun flushParagraph() {
         if (currentParagraph.isNotEmpty()) {
@@ -1036,7 +1602,6 @@ internal fun parseBlocks(text: String): List<MarkdownBlock> {
         inTable = false
         tableHeaders = emptyList()
         tableRows.clear()
-        tableSeparatorSeen = false
     }
 
     var i = 0
@@ -1070,7 +1635,6 @@ internal fun parseBlocks(text: String): List<MarkdownBlock> {
             flushParagraph()
             inTable = true
             tableHeaders = parseTableCells(trimmed)
-            tableSeparatorSeen = true
             i += 2 // skip header row + separator row
             continue
         }
@@ -1081,9 +1645,7 @@ internal fun parseBlocks(text: String): List<MarkdownBlock> {
                 i++
                 continue
             } else {
-                // End of table
                 flushTable()
-                // Don't increment i, re-process this line
                 continue
             }
         }
@@ -1092,10 +1654,18 @@ internal fun parseBlocks(text: String): List<MarkdownBlock> {
             trimmed.isEmpty() -> {
                 flushParagraph()
             }
+            markdownDividerRegex.matches(trimmed) -> {
+                flushParagraph()
+                blocks.add(MarkdownBlock.Divider)
+            }
             markdownImageRegex.matchEntire(trimmed) != null -> {
                 flushParagraph()
                 val match = markdownImageRegex.matchEntire(trimmed)!!
                 blocks.add(MarkdownBlock.ImageBlock(match.groupValues[1].trim(), match.groupValues[2].trim().removeSurrounding("<", ">")))
+            }
+            trimmed.startsWith(">") -> {
+                flushParagraph()
+                blocks.add(MarkdownBlock.BlockQuote(trimmed.removePrefix(">").trim()))
             }
             trimmed.startsWith("#") -> {
                 flushParagraph()
@@ -1140,57 +1710,60 @@ private fun MarkdownTable(
     headers: List<String>,
     rows: List<List<String>>,
     textColor: Color,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val borderColor = scheme.outlineVariant.copy(alpha = 0.25f)
-    val headerBg = scheme.surfaceContainer
+    val semantic = MaterialTheme.deerflowColors
+    val borderColor = scheme.outlineVariant
+    val headerBg = semantic.codeHeaderSurface
 
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
+            .horizontalScroll(rememberScrollState()),
     ) {
         Column(
             modifier = Modifier
-                .border(1.dp, borderColor, RoundedCornerShape(6.dp))
+                .clip(RoundedCornerShape(10.dp))
+                .border(1.dp, borderColor, RoundedCornerShape(10.dp)),
         ) {
-            // Header row
             Row(
                 modifier = Modifier
-                    .background(headerBg, RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
-                    .height(IntrinsicSize.Min)
+                    .background(headerBg)
+                    .height(IntrinsicSize.Min),
             ) {
                 headers.forEachIndexed { index, header ->
                     if (index > 0) {
                         Box(
                             modifier = Modifier
                                 .width(1.dp)
-                                .height(IntrinsicSize.Max)
-                                .background(borderColor)
+                                .fillMaxHeight()
+                                .background(borderColor),
                         )
                     }
                     Text(
-                        text = parseMarkdownInline(header, scheme),
+                        text = parseMarkdownInline(header, scheme, semantic),
                         style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.SemiBold,
                         color = textColor,
                         modifier = Modifier
-                            .width(IntrinsicSize.Max)
-                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                            .widthIn(min = 64.dp, max = 220.dp)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
                     )
                 }
             }
 
             HorizontalDivider(color = borderColor, thickness = 1.dp)
 
-            // Data rows
             rows.forEachIndexed { rowIndex, row ->
                 if (rowIndex > 0) {
-                    HorizontalDivider(color = borderColor.copy(alpha = 0.15f), thickness = 1.dp)
+                    HorizontalDivider(color = borderColor.copy(alpha = 0.55f), thickness = 1.dp)
                 }
+                val rowBg = if (rowIndex % 2 == 1) scheme.surfaceContainerLow else Color.Transparent
                 Row(
-                    modifier = Modifier.height(IntrinsicSize.Min)
+                    modifier = Modifier
+                        .background(rowBg)
+                        .height(IntrinsicSize.Min),
                 ) {
                     val colCount = headers.size.coerceAtLeast(row.size)
                     for (colIdx in 0 until colCount) {
@@ -1198,17 +1771,17 @@ private fun MarkdownTable(
                             Box(
                                 modifier = Modifier
                                     .width(1.dp)
-                                    .height(IntrinsicSize.Max)
-                                    .background(borderColor.copy(alpha = 0.15f))
+                                    .fillMaxHeight()
+                                    .background(borderColor.copy(alpha = 0.55f)),
                             )
                         }
                         Text(
-                            text = parseMarkdownInline(row.getOrElse(colIdx) { "" }, scheme),
+                            text = parseMarkdownInline(row.getOrElse(colIdx) { "" }, scheme, semantic),
                             style = MaterialTheme.typography.bodySmall,
-                            color = textColor.copy(alpha = 0.9f),
+                            color = textColor.copy(alpha = 0.92f),
                             modifier = Modifier
-                                .width(IntrinsicSize.Max)
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                .widthIn(min = 64.dp, max = 220.dp)
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
                         )
                     }
                 }
@@ -1217,7 +1790,11 @@ private fun MarkdownTable(
     }
 }
 
-private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedString = buildAnnotatedString {
+private fun parseMarkdownInline(
+    text: String,
+    scheme: ColorScheme,
+    semantic: DeerflowSemanticColors,
+): AnnotatedString = buildAnnotatedString {
     var i = 0
     val len = text.length
     val linkStyle = SpanStyle(
@@ -1227,7 +1804,6 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
     )
     while (i < len) {
         when {
-            // Link: [label](https://example.com)
             text[i] == '[' -> {
                 val labelEnd = text.indexOf(']', i + 1)
                 val urlStart = labelEnd + 1
@@ -1241,7 +1817,7 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
                                 LinkAnnotation.Url(
                                     url = url,
                                     styles = TextLinkStyles(style = linkStyle),
-                                )
+                                ),
                             ) {
                                 append(label)
                             }
@@ -1251,7 +1827,6 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
                     }
                 }
             }
-            // Bold
             i + 3 < len && text.substring(i, i + 2) == "**" -> {
                 val end = text.indexOf("**", i + 2)
                 if (end != -1) {
@@ -1263,7 +1838,17 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
                     continue
                 }
             }
-            // Inline Code
+            i + 3 < len && text.substring(i, i + 2) == "~~" -> {
+                val end = text.indexOf("~~", i + 2)
+                if (end != -1) {
+                    val content = text.substring(i + 2, end)
+                    pushStyle(SpanStyle(textDecoration = TextDecoration.LineThrough))
+                    append(content)
+                    pop()
+                    i = end + 2
+                    continue
+                }
+            }
             i + 1 < len && text[i] == '`' -> {
                 val end = text.indexOf('`', i + 1)
                 if (end != -1) {
@@ -1271,10 +1856,10 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
                     pushStyle(
                         SpanStyle(
                             fontFamily = FontFamily.Monospace,
-                            background = scheme.surfaceVariant.copy(alpha = 0.6f),
+                            background = semantic.inlineCodeSurface,
                             color = scheme.primary,
-                            fontWeight = FontWeight.Medium
-                        )
+                            fontWeight = FontWeight.Medium,
+                        ),
                     )
                     append(" $content ")
                     pop()
@@ -1282,7 +1867,6 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
                     continue
                 }
             }
-            // Italic
             i + 2 < len && text[i] == '*' -> {
                 val end = text.indexOf('*', i + 1)
                 if (end != -1) {
@@ -1300,18 +1884,13 @@ private fun parseMarkdownInline(text: String, scheme: ColorScheme): AnnotatedStr
     }
 }
 
-private fun isRenderableMarkdownUrl(url: String): Boolean {
-    return url.startsWith("http://") || url.startsWith("https://")
-}
+private fun isRenderableMarkdownUrl(url: String): Boolean =
+    url.startsWith("http://") || url.startsWith("https://")
 
 // ---------------------------------------------------------------------------
 // Streaming animation helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Small spinning indicator shown in tool/thinking/reasoning headers while the
- * block is still being streamed. Replaces the static icon during accumulation.
- */
 @Composable
 private fun StreamingIndicator(
     tint: Color,
@@ -1334,10 +1913,6 @@ private fun StreamingIndicator(
     )
 }
 
-/**
- * Icon slot for streaming blocks: shows a spinner while [isStreaming] is true,
- * briefly flashes a checkmark when streaming ends, then settles to [staticIcon].
- */
 @Composable
 private fun StreamingIcon(
     isStreaming: Boolean,
@@ -1352,7 +1927,7 @@ private fun StreamingIcon(
     LaunchedEffect(isStreaming) {
         if (wasStreaming && !isStreaming) {
             showCheck = true
-            kotlinx.coroutines.delay(checkDurationMs.toLong())
+            delay(checkDurationMs.toLong())
             showCheck = false
         }
         wasStreaming = isStreaming
@@ -1374,9 +1949,6 @@ private fun StreamingIcon(
     }
 }
 
-/**
- * Blinking caret shown at the tail of streaming assistant text.
- */
 @Composable
 private fun TypingCursor(
     color: Color,
